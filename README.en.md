@@ -18,7 +18,7 @@ Built with **Tauri 2, Vue 3, TypeScript, Rust, and SQLite**. Source code is avai
 
 ## Screenshots
 
-![Question bank with subject and chapter filters, a question list, and an answer preview](docs/images/question-bank.png)
+![Question bank with subject and chapter filters, a question list, and preview and editing actions](docs/images/question-bank.png)
 
 <details>
 <summary><strong>Paper assembly and page layout</strong></summary>

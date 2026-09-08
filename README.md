@@ -23,9 +23,9 @@ TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件
 
 ## 界面预览
 
-### 整理题库：分类、检索与题目预览
+### 整理题库：分类、检索与题目管理
 
-![题库管理界面：左侧按学科与章节分类，中间列出题目，右侧查看题干、答案和解析](docs/images/question-bank.png)
+![题库管理界面：左侧按学科与章节分类，中间检索和查看题目列表，操作栏提供预览与编辑入口](docs/images/question-bank.png)
 
 <details>
 <summary><strong>查看选题组卷与试卷排版截图</strong></summary>
