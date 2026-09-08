@@ -1,0 +1,4 @@
+# SQLx stores a checksum of every applied migration. Keep migration bytes
+# stable across Windows and Unix checkouts so CRLF conversion cannot make an
+# existing user database look as if its migration history was modified.
+src-tauri/migrations/*.sql text eol=lf

@@ -1,0 +1,58 @@
+[package]
+name = "zhitiku-desktop"
+version = "0.1.83"
+description = "TK试题题库 Windows 离线题库管理软件"
+authors = ["Zhitiku"]
+license = "MIT"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "zhitiku_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+sha2 = "0.10"
+base64 = "0.22"
+ed25519-dalek = { version = "2.2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "fs", "macros", "time"] }
+unicode-normalization = "0.1"
+uuid = { version = "1", features = ["v7", "serde"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
+calamine = { version = "0.36.1", default-features = false }
+cfb = "0.14"
+scraper = { version = "0.27", default-features = false }
+ego-tree = "0.11"
+tex2word-math = "1.0.6"
+time = { version = "0.3.53", features = ["local-offset"] }
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.38.2"
+windows-core = "0.61"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+    "Win32_System_Memory",
+] }
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+
+[dev-dependencies]
+minisign-verify = "0.2.5"

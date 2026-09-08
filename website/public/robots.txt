@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /updates/
+
+Sitemap: https://tktiku.cn/sitemap.xml
