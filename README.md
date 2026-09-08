@@ -4,13 +4,54 @@
 
 # BCTK · TK试题题库
 
-**把日常积累的题目，整理成随时可用的题库和试卷。**
+**把散落在文档里的题目，整理成自己的本地题库。**
 
-TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件，覆盖题目录入、分类管理、选题组卷、排版打印和备份恢复。以本地数据为核心，题库保存在自己的电脑上，日常本地功能可以离线使用。
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#获取与使用)
+[![Version](https://img.shields.io/badge/release-v0.1.83-16a34a)](https://github.com/BBkjdayup/BCTK/releases/tag/v0.1.83)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#技术组成与目录)
 
-基于 **Tauri 2、Vue 3、TypeScript、Rust 和 SQLite** 构建，使用 **MIT 许可证**开放源码。当前源码版本为 **v0.1.83**。
+[中文](README.md) · [English](README.en.md)
 
-[功能介绍](#功能介绍) · [获取与使用](#获取与使用) · [从源码运行](#从源码运行) · [开源范围与授权](#开源范围与授权) · [参与贡献](#参与贡献)
+TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件。从题目录入、分类检索，到选题组卷、分页排版和备份恢复，让日常积累的题目可以反复使用。题库保存在自己的电脑上，日常本地功能可以离线使用。
+
+基于 **Tauri 2 + Vue 3 + TypeScript + Rust + SQLite** 构建，源码采用 **MIT 许可证**。
+
+**[下载 Windows 安装包](https://github.com/BBkjdayup/BCTK/releases/tag/v0.1.83)** · [查看界面](#界面预览) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
+
+> **使用前请了解：** 当前 v0.1.83 程序保留 15 天专业版试用、15 天宽限期及之后的基础模式限制；MIT 开源许可不会自动取消程序内的授权判断。[查看具体范围](#开源范围与授权)。
+
+## 界面预览
+
+### 整理题库：分类、检索与题目预览
+
+![题库管理界面：左侧按学科与章节分类，中间列出题目，右侧查看题干、答案和解析](docs/images/question-bank.png)
+
+<details>
+<summary><strong>查看选题组卷与试卷排版截图</strong></summary>
+
+**选题组卷**：筛选候选题目，加入试卷，查看已选内容和题型分布。
+
+![选题组卷界面：按分类筛选题目，并将四道示例题加入试卷](docs/images/paper-selection.png)
+
+**试卷排版**：在分页稿中调整正文和版面，设置试卷标题与显示内容。
+
+![试卷排版界面：编辑示例练习的标题、正文、纸张和版式](docs/images/paper-layout.png)
+
+</details>
+
+以上为 v0.1.83 浏览器演示模式的实际界面截图，使用内置示例题。演示模式不读写真实题库；文件导入导出、备份恢复等操作需要使用桌面版。
+
+## 从这里开始
+
+| 你想做什么 | 入口 |
+| --- | --- |
+| 下载软件，整理自己的题库 | [Windows v0.1.83](https://github.com/BBkjdayup/BCTK/releases/tag/v0.1.83) · [安装与首次使用](docs/Windows安装与首次使用.md) |
+| 了解能处理哪些教学资料 | [功能介绍](#功能介绍) · [文件兼容说明](#文件兼容说明) |
+| 运行源码或预览界面 | [开发环境与启动步骤](#从源码运行) |
+| 反馈教学需求或参与开发 | [提交 Issue](https://github.com/BBkjdayup/BCTK/issues) · [贡献指南](CONTRIBUTING.md) |
+
+如果这个项目对你有用，欢迎点一下右上角的 **Star** 收藏；使用反馈和可复现的示例也能帮助项目改进。
 
 ## 功能介绍
 
@@ -43,13 +84,13 @@ Word 文档由本机 Rust 模块读取和生成，无需调用 Microsoft Office�
 
 当前主要支持 **Windows 10 / 11 x64**。
 
-本仓库首次开源提供 v0.1.83 源码。安装包发布情况请查看 [GitHub Releases](https://github.com/BBkjdayup/BCTK/releases)；若没有可用安装包，可按下方步骤从源码构建。GitHub 自动生成的源码压缩包需要构建后才能作为桌面程序运行。
+1. 打开 [v0.1.83 发布页](https://github.com/BBkjdayup/BCTK/releases/tag/v0.1.83)。
+2. 在 **Assets** 中下载 `BCTK_0.1.83_windows_x64-setup.exe`，按中文向导安装。
+3. 启动“TK试题题库”，建立分类并尝试录入、筛选和组卷。
 
-构建产生的安装文件名称为：
+也可以[直接下载安装包](https://github.com/BBkjdayup/BCTK/releases/download/v0.1.83/BCTK_0.1.83_windows_x64-setup.exe)。发布页提供 SHA-256 校验文件；GitHub 自动生成的 **Source code** 压缩包是源码，不能直接作为桌面程序运行。
 
-```text
-TK试题题库_<版本号>_x64-setup.exe
-```
+本次提供已有 v0.1.83 Windows 安装包，文件摘要与更新签名已核对；它没有 Windows Authenticode 签名，Windows 可能显示“未知发布者”。版本来源、授权状态和校验方法见[发布说明](docs/releases/v0.1.83.md)。
 
 安装程序使用中文向导，默认仅为当前 Windows 用户安装。若电脑缺少 WebView2，安装时会联网下载运行环境；因此，本地功能可离线使用不代表安装包可以在所有电脑上完全离线安装。
 
@@ -190,6 +231,16 @@ pnpm website:build
 
 客户端包含账号登录、云同步和冲突处理实现；使用云同步需要配套服务与相应账号权限。启用同步后，相关数据会按同步流程传输到配置的服务。本仓库不包含独立云服务端，桌面离线授权与云同步授权相互独立。
 
+## 常见问题
+
+**必须注册账号、购买服务器才能使用吗？** 本地题库功能无需云账号，也无需自己部署服务器。云同步是需要配套服务与账号权限的独立功能。
+
+**开源是否意味着现有安装包的所有功能永久免费？** 当前程序保留原试用与授权流程。源码的使用、修改和分发遵循 MIT 许可，程序的默认行为见下一节。
+
+**支持 macOS、Linux 或在线题库吗？** 当前安装包和主要验证环境为 Windows 10 / 11 x64。浏览器模式用于界面演示，不能替代桌面应用的本地文件功能；在线题库仍属于后续开发范围。
+
+**导出的 Word 和预览会完全一样吗？** 两者使用不同的排版引擎，复杂字体、换行与页数可能存在差异。正式使用前请核对导出结果，支持范围见[文件兼容说明](#文件兼容说明)。
+
 ## 开源范围与授权
 
 本仓库包含桌面客户端、官网、数据库迁移、测试、开发文档及授权工具源码，原创代码采用 [MIT 许可证](LICENSE)。第三方组件保留各自版权和许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
@@ -220,6 +271,8 @@ MIT 许可证允许按其条款使用、修改和分发源码；它不会自动�
 ## 参与贡献
 
 欢迎教师提供真实的教学需求，也欢迎开发者改进功能、修复问题、补充测试和完善文档。
+
+尤其欢迎以下反馈：Word / Excel 导入时的最小示例、数学公式与表格的显示问题、真实教学中的分类和组卷需求，以及能让首次使用更简单的改进建议。
 
 - 使用问题与功能建议：提交 [Issue](https://github.com/BBkjdayup/BCTK/issues)。
 - 代码与文档改进：阅读 [贡献指南](CONTRIBUTING.md) 后提交 Pull Request。

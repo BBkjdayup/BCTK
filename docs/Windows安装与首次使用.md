@@ -2,9 +2,11 @@
 
 ## 安装哪个文件
 
-普通用户请双击：
+普通用户请前往 [GitHub Releases](https://github.com/BBkjdayup/BCTK/releases/tag/v0.1.83)，在 Assets 中下载并双击：
 
-`src-tauri/target/release/bundle/nsis/TK试题题库_<版本号>_x64-setup.exe`
+`BCTK_0.1.83_windows_x64-setup.exe`
+
+GitHub 自动生成的 Source code 是源码压缩包，不是安装程序。开发者自行构建的安装包位于 `src-tauri/target/release/bundle/nsis/`，文件名为 `TK试题题库_<版本号>_x64-setup.exe`。
 
 这是 64 位 Windows 中文联网引导安装包。若电脑已经安装 WebView2，安装时不会重复下载；若缺少 WebView2，安装程序会联网下载运行环境。安装完成后，题库的本地功能可以离线使用。
 
@@ -17,7 +19,7 @@
 
 ## Windows 显示“未知发布者”是什么意思
 
-当前测试版没有商业代码签名证书，所以 Windows 可能显示“未知发布者”或 SmartScreen 提示。这表示 Windows 无法确认发布者身份，不表示自动测试失败。请只使用本项目目录中生成、且 SHA-256 与交付记录一致的安装包；公开发送给大量用户前应再购买证书并签名。
+当前版本没有 Windows Authenticode 签名，所以 Windows 可能显示“未知发布者”或 SmartScreen 提示。这表示 Windows 无法确认发布者身份。请从本仓库的 GitHub Release 下载，并核对发布页及 `SHA256SUMS.txt` 中的 SHA-256；具体版本来源、签名状态和核验范围见 [v0.1.83 发布说明](releases/v0.1.83.md)。
 
 ## 数据保存在哪里
 
