@@ -11,7 +11,9 @@
 [![Version](https://img.shields.io/badge/release-v0.1.88-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.88)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#技术组成与目录)
 
-[中文](README.md) · [English](README.en.md)
+<p align="center">
+  <strong>简体中文</strong> · <a href="README.en.md">English</a>
+</p>
 
 TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件。从题目录入、分类检索，到选题组卷、分页排版、导入导出和备份恢复，让日常积累的题目可以反复使用。
 
@@ -21,24 +23,36 @@ TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件
 
 **[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.88 源码](https://github.com/BBkjdayup/BCTK/tree/v0.1.88) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
 
+## 一图了解使用流程
+
+```mermaid
+flowchart LR
+  A["Word / Excel<br/>或手工录入"] --> B["本地题库<br/>分类 · 标签 · 查重"]
+  B --> C["手动选题<br/>或随机抽题"]
+  C --> D["分页排版<br/>模板 · 题目顺序 · 样式"]
+  D --> E["Word 导出<br/>或系统打印"]
+  D -. "按需主动发布" .-> F["可选小程序服务<br/>手机答题"]
+```
+
+默认工作流全部在本机完成；只有用户主动使用小程序发布功能时，选定的试卷内容才会发送到配套服务。
+
 ## 界面预览
 
-### 整理题库：分类、检索与题目管理
+<p align="center">
+  <img src="docs/images/question-bank.png" width="100%" alt="题库管理界面：按学科与章节分类、检索并管理题目">
+</p>
+<p align="center"><sub>题库管理：分类、检索、预览与编辑</sub></p>
 
-![题库管理界面：左侧按学科与章节分类，中间检索和查看题目列表，操作栏提供预览与编辑入口](docs/images/question-bank.png)
-
-<details>
-<summary><strong>查看选题组卷与试卷排版截图</strong></summary>
-
-**选题组卷**：筛选候选题目，加入试卷，查看已选内容和题型分布。
-
-![选题组卷界面：按分类筛选题目，并将四道示例题加入试卷](docs/images/paper-selection.png)
-
-**试卷排版**：在分页稿中调整正文和版面，设置试卷标题与显示内容。
-
-![试卷排版界面：编辑示例练习的标题、正文、纸张和版式](docs/images/paper-layout.png)
-
-</details>
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/paper-selection.png" alt="选题组卷界面：筛选并选择试题"></td>
+    <td width="50%"><img src="docs/images/paper-layout.png" alt="试卷分页排版界面"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>选题组卷</strong><br><sub>筛选候选题目，调整已选内容与顺序</sub></td>
+    <td align="center"><strong>分页排版</strong><br><sub>编辑标题、正文、纸张、模板并导出 Word</sub></td>
+  </tr>
+</table>
 
 截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.88 延续相同的核心工作区。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
 
@@ -187,7 +201,19 @@ BCTK/
 └── LICENSE                 # MIT 许可证
 ```
 
-## 数据与联网边界
+## 架构与数据边界
+
+```mermaid
+flowchart TB
+  subgraph Local["Windows 本机（默认）"]
+    UI["Vue 3 界面"] --> Core["Tauri / Rust 本地核心"]
+    Core --> DB[("SQLite 题库")]
+    Core --> Files["图片 · 模板 · 备份 · 导出文件"]
+  end
+
+  Core -. "仅检查版本" .-> Update["官方更新源"]
+  Core -. "用户主动发布的试卷快照" .-> Mini["可选小程序服务"]
+```
 
 - 题库默认保存在本机 SQLite 数据库，不需要单独安装数据库服务器。
 - 图片、模板、备份和导出文件由本地数据目录统一管理。

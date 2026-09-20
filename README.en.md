@@ -6,7 +6,14 @@
 
 **Build a local question bank from your teaching materials, then turn it into reusable exam papers.**
 
-[中文](README.md) · English
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#install-on-windows)
+[![Version](https://img.shields.io/badge/release-v0.1.88-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.88)
+[![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#architecture-and-data-boundaries)
+
+<p align="center">
+  <a href="README.md">简体中文</a> · <strong>English</strong>
+</p>
 
 BCTK (TK试题题库) is a Windows desktop application for teachers and educational organizations. It brings question editing, classification, paper assembly, page layout, document import/export, and backup into one workflow.
 
@@ -16,20 +23,47 @@ Built with **Tauri 2, Vue 3, TypeScript, Rust, and SQLite**. Original source cod
 
 **[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.88 source tag](https://github.com/BBkjdayup/BCTK/tree/v0.1.88) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
 
+## Workflow at a glance
+
+```mermaid
+flowchart LR
+  A["Word / Excel<br/>or manual entry"] --> B["Local question bank<br/>classify · tag · deduplicate"]
+  B --> C["Manual selection<br/>or random draw"]
+  C --> D["Paginated layout<br/>templates · order · styling"]
+  D --> E["Word export<br/>or system printing"]
+  D -. "optional explicit publish" .-> F["Mini-program service<br/>mobile answering"]
+```
+
+The default workflow stays on the local computer. Selected paper content is sent to a compatible service only when the user explicitly uses mini-program publishing.
+
 ## Screenshots
 
-![Question bank with subject and chapter filters, a question list, and preview and editing actions](docs/images/question-bank.png)
+<p align="center">
+  <img src="docs/images/question-bank.png" width="100%" alt="Question-bank workspace with subject and chapter filters, search, preview, and editing actions">
+</p>
+<p align="center"><sub>Question-bank management: classify, search, preview, and edit</sub></p>
 
-<details>
-<summary><strong>Paper assembly and page layout</strong></summary>
-
-![Selecting four sample questions for a paper](docs/images/paper-selection.png)
-
-![Editing the title, content, and layout of a sample paper](docs/images/paper-layout.png)
-
-</details>
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/paper-selection.png" alt="Paper assembly workspace for filtering and selecting questions"></td>
+    <td width="50%"><img src="docs/images/paper-layout.png" alt="Paginated paper layout workspace"></td>
+  </tr>
+  <tr>
+    <td align="center"><strong>Paper assembly</strong><br><sub>Filter candidates and adjust selected questions</sub></td>
+    <td align="center"><strong>Page layout</strong><br><sub>Edit title, content, paper settings, templates, and Word output</sub></td>
+  </tr>
+</table>
 
 The screenshots were captured from the v0.1.83 browser demo; v0.1.88 keeps the same core workspace. The demo uses built-in sample questions and does not access real question-bank files.
+
+## Start here
+
+| Goal | Entry point |
+| --- | --- |
+| Install the Windows application | [Official download](https://tktiku.cn/#download) |
+| Explore or develop from source | [Run from source](#run-from-source) |
+| Understand repository boundaries | [Repository scope](#repository-scope) |
+| Report a problem or suggest a feature | [GitHub Issues](https://github.com/BBkjdayup/BCTK/issues) |
 
 ## Features
 
@@ -98,7 +132,19 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 
 Automated checks do not replace installation, printing, document compatibility, and backup/restore testing on Windows.
 
-## Data and network boundaries
+## Architecture and data boundaries
+
+```mermaid
+flowchart TB
+  subgraph Local["Local Windows computer (default)"]
+    UI["Vue 3 interface"] --> Core["Tauri / Rust local core"]
+    Core --> DB[("SQLite question bank")]
+    Core --> Files["Images · templates · backups · exports"]
+  end
+
+  Core -. "version checks only" .-> Update["Official update endpoint"]
+  Core -. "paper snapshot explicitly published by the user" .-> Mini["Optional mini-program service"]
+```
 
 - The question bank, images, templates, backups, and exports remain in the local data directory by default.
 - The retired question-bank cloud-sync feature was removed in v0.1.85; the application does not silently upload the local database.
