@@ -24,4 +24,4 @@ LangString webview2DownloadSuccess ${LANG_SIMPCHINESE} "WebView2 引导程序下
 LangString webview2Downloading ${LANG_SIMPCHINESE} "正在下载 WebView2 引导程序..."
 LangString webview2InstallError ${LANG_SIMPCHINESE} "错误：安装 WebView2 时失败，错误代码：$1"
 LangString webview2InstallSuccess ${LANG_SIMPCHINESE} "成功安装 WebView2"
-LangString deleteAppData ${LANG_SIMPCHINESE} "删除本机题库、设置和登录信息（保留试用校验记录）"
+LangString deleteAppData ${LANG_SIMPCHINESE} "删除本机题库和设置"

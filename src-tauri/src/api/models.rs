@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    docx::{TemplateFontTheme, TemplateLayoutBlock, TemplatePageSetup, TemplateStyleProfile},
-    licensing::{LicenseError, LicenseOverview},
+use crate::docx::{
+    TemplateFontTheme, TemplateLayoutBlock, TemplatePageSetup, TemplateStyleProfile,
 };
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -115,7 +114,6 @@ pub struct BootstrapDataApi {
     pub database_healthy: bool,
     pub database_error: Option<String>,
     pub app_version: String,
-    pub license: LicenseOverview,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -165,6 +163,8 @@ pub struct QuestionApi {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionDraftApi {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub answer_review_required: bool,
     pub id: Option<String>,
     pub question_id: Option<String>,
     #[serde(rename = "type")]
@@ -180,6 +180,10 @@ pub struct QuestionDraftApi {
     #[serde(default)]
     pub resource_refs: Vec<QuestionResourceRefApi>,
     pub base_content_version: Option<i64>,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -431,6 +435,14 @@ pub struct QuestionDuplicateMemberApi {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct QuestionStemSummaryApi {
+    pub id: String,
+    pub content_version: i64,
+    pub stem: RichContentApi,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QuestionDuplicateGroupApi {
     pub id: String,
     pub duplicate_kind: String,
@@ -645,6 +657,14 @@ pub struct PaperApi {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PaperRecoveryApi {
+    pub paper: PaperApi,
+    pub revision: String,
+    pub autosaved_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PaperSummaryApi {
     pub id: String,
     pub title: String,
@@ -686,6 +706,10 @@ pub struct ExportPaperDocxRequestApi {
     pub expected_paper_row_version: i64,
     pub template_id: String,
     pub output_path: String,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub content_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1257,12 +1281,6 @@ impl CommandError {
 
     pub fn validation(message: impl Into<String>) -> Self {
         Self::new("VALIDATION_ERROR", message)
-    }
-}
-
-impl From<LicenseError> for CommandError {
-    fn from(error: LicenseError) -> Self {
-        Self::new(error.code, error.message)
     }
 }
 

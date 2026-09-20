@@ -31,7 +31,16 @@ const lineStyle = computed<Record<string, string>>(() => ({
 
 async function renderFormulas() {
   await nextTick()
-  if (root.value) renderMathNodes(root.value)
+  if (root.value) {
+    renderMathNodes(root.value)
+    root.value.querySelectorAll<HTMLElement>('.math-node').forEach((node) => {
+      if (node.querySelector('.katex-error') || !node.textContent?.trim()) {
+        node.textContent = '〔公式〕'
+        node.setAttribute('aria-label', '公式暂无法显示，请查看完整内容')
+        node.removeAttribute('title')
+      }
+    })
+  }
 }
 
 watch(summaryHtml, () => { void renderFormulas() })
@@ -54,7 +63,8 @@ onMounted(() => { void renderFormulas() })
   max-width: 100%;
   display: -webkit-box;
   overflow: hidden;
-  line-height: 1.55;
+  padding-block: 0.2em;
+  line-height: 1.8;
   overflow-wrap: anywhere;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: var(--question-stem-summary-lines);

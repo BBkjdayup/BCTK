@@ -1,5 +1,4 @@
 pub(crate) mod backups;
-mod cloud;
 mod commands;
 mod document_entry_templates;
 mod docx;
@@ -20,6 +19,6 @@ mod taxonomy;
 mod templates;
 mod templates_core;
 
-pub use cloud::*;
 pub use commands::*;
 pub use state::AppState;
+pub(crate) mod content_identity;

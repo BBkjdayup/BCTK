@@ -6,26 +6,15 @@ import AppShell from './layouts/AppShell.vue'
 import { backend, isDesktopRuntime } from './services/backend'
 import { errorMessage } from './services/errors'
 import { useAppStore } from './stores/app'
+import { usePaperStore } from './stores/paper'
 import { checkAndOfferAppUpdate } from './utils/appUpdateFlow'
-import { shouldRunAutomaticCloudSync } from './utils/cloudSyncPolicy'
 
 const appStore = useAppStore()
-let cloudSyncTimer: ReturnType<typeof setInterval> | null = null
 let appUpdateTimer: ReturnType<typeof setTimeout> | null = null
-
-async function runCloudSyncSilently() {
-  if (!isDesktopRuntime() || !appStore.databaseHealthy) return
-  try {
-    const status = await backend.getCloudAccountStatus()
-    if (shouldRunAutomaticCloudSync(status)) await backend.cloudSyncNow()
-  } catch {
-    // Cloud service is optional. Offline/network failures must not interrupt
-    // local question entry or repeatedly notify the teacher.
-  }
-}
 
 onMounted(async () => {
   await appStore.initialize()
+  if (appStore.databaseHealthy) await usePaperStore().initializeRecovery()
   if (!isDesktopRuntime()) return
 
   appUpdateTimer = setTimeout(() => {
@@ -50,12 +39,9 @@ onMounted(async () => {
     ElMessage.warning(errorMessage(reason, '自动备份未完成；软件可以继续使用，请稍后到“数据备份与恢复”检查'))
   }
 
-  await runCloudSyncSilently()
-  cloudSyncTimer = setInterval(() => { void runCloudSyncSilently() }, 10 * 60 * 1000)
 })
 
 onUnmounted(() => {
-  if (cloudSyncTimer) clearInterval(cloudSyncTimer)
   if (appUpdateTimer) clearTimeout(appUpdateTimer)
 })
 </script>

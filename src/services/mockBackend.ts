@@ -1,3 +1,5 @@
+import { hasMeaningfulRichContent, richContentSearchText } from '../utils/richContent'
+import { richContentIdentity } from '../utils/richContentIdentity'
 import type {
   AppSettings,
   AutomaticBackupRun,
@@ -6,8 +8,6 @@ import type {
   BackupRecord,
   ManagedImagePayload,
   StoreManagedImageInput,
-  LicenseFileResult,
-  LicenseOverview,
   BootstrapData,
   Chapter,
   DocxDiagnostic,
@@ -72,36 +72,6 @@ import { fallbackQuestionTypes, matchesChoiceBehavior } from '../utils/questionT
 import { matchesQuestionUsage } from '../utils/questionUsage'
 
 const now = Date.now()
-
-const mockLicense: LicenseOverview = {
-  deviceId: 'browser-demo-device',
-  desktop: {
-    state: 'active',
-    plan: 'desktop_professional',
-    licenseId: 'browser-demo',
-    customerName: '浏览器演示',
-    issuedAtMs: now,
-    expiresAtMs: null,
-    graceEndsAtMs: null,
-    message: '浏览器演示使用完整功能，不代表真实授权状态。',
-  },
-  cloud: {
-    state: 'notConfigured',
-    syncEnabled: false,
-    webAppEnabled: false,
-    expiresAtMs: null,
-    message: '云同步与网页版尚未接入。',
-  },
-  capabilities: {
-    canEditSingleQuestion: true,
-    canBatchImport: true,
-    maxQuestionsPerPaper: null,
-    canExportDocuments: true,
-    canPrint: true,
-    canUseCloudSync: false,
-    canUseWebApp: false,
-  },
-}
 
 const rich = (html: string): RichContent => ({
   schemaVersion: 1,
@@ -574,17 +544,18 @@ function isDuplicateWhitespace(character: string) {
     || codePoint === 0x3000
 }
 
-function normalizedExactQuestion(content: DuplicateContent) {
-  return [...[
-    content.stem.plainText,
-    content.options.map((option) => option.content.plainText).join('\u001e'),
-    content.answer.plainText,
-  ]
-    .join('\u001f')
-    .normalize('NFKC')
-    .toLocaleLowerCase('zh-CN')]
-    .filter((character) => !isDuplicateWhitespace(character))
-    .join('')
+function canCompareExact(content: DuplicateContent & Pick<QuestionDraft, 'explanation'>) {
+  return [content.stem, ...content.options.map((option) => option.content), content.answer, content.explanation].every((field) => {
+    if (!/<(?:img|svg|math|object)\b/iu.test(field.html)) return true
+    const document = new DOMParser().parseFromString(field.html, 'text/html')
+    return !document.querySelector('svg, math, object') && [...document.querySelectorAll('img')]
+      .every((image) => managedImages.has(image.getAttribute('data-resource-id') ?? ''))
+  })
+}
+
+function normalizedExactQuestion(content: DuplicateContent & Pick<QuestionDraft, 'type' | 'explanation'>) {
+  return JSON.stringify([2, content.type, [content.stem, ...content.options.map((option) => option.content), content.answer, content.explanation]
+    .map((field) => richContentIdentity(field, (id) => managedImages.get(id)?.dataBase64))])
 }
 
 function boundedRawCharacters(parts: string[]) {
@@ -605,9 +576,9 @@ function normalizedSimilarityField(parts: string[]) {
 }
 
 function similarityPrefilterLength(content: DuplicateContent) {
-  return boundedRawCharacters([content.stem.plainText]).length
-    + boundedRawCharacters(content.options.map((option) => option.content.plainText)).length
-    + boundedRawCharacters([content.answer.plainText]).length
+  return boundedRawCharacters([richContentSearchText(content.stem)]).length
+    + boundedRawCharacters(content.options.map((option) => richContentSearchText(option.content))).length
+    + boundedRawCharacters([richContentSearchText(content.answer)]).length
 }
 
 function utf8Bytes(text: string) {
@@ -636,7 +607,7 @@ function validateDuplicateRichContent(label: string, content: RichContent, allow
   } else if (utf8Bytes(JSON.stringify(content.document)) > 4 * 1024 * 1024) {
     taxonomyError(`${label}的 Tiptap 文档 JSON 超过安全上限。`)
   }
-  if (!allowEmpty && ![...content.plainText].some((character) => !isDuplicateWhitespace(character))) {
+  if (!allowEmpty && !hasMeaningfulRichContent(content)) {
     taxonomyError(`${label}不能为空。`)
   }
   if (content.plainText.includes('\u001e') || content.plainText.includes('\u001f')) {
@@ -655,6 +626,7 @@ function validateDuplicateRichContent(label: string, content: RichContent, allow
 }
 
 function validateDuplicateDraft(draft: QuestionDraft) {
+  if (draft.answerReviewRequired) taxonomyError('选项已变化，请核对并确认答案后再保存。')
   const definition = questionTypes.find((item) => item.code === draft.type && item.isEnabled)
   if (!definition) taxonomyError('所选题型不存在或已经停用。')
   if (draft.options.length > 26) taxonomyError('一道题最多允许 26 个选项。')
@@ -680,11 +652,11 @@ function validateDuplicateDraft(draft: QuestionDraft) {
 
 function similarityText(content: DuplicateContent) {
   return [
-    ...normalizedSimilarityField([content.stem.plainText]),
+    ...normalizedSimilarityField([richContentSearchText(content.stem)]),
     '\u001f',
-    ...normalizedSimilarityField(content.options.map((option) => option.content.plainText)),
+    ...normalizedSimilarityField(content.options.map((option) => richContentSearchText(option.content))),
     '\u001f',
-    ...normalizedSimilarityField([content.answer.plainText]),
+    ...normalizedSimilarityField([richContentSearchText(content.answer)]),
   ]
 }
 
@@ -1161,24 +1133,7 @@ export const mockBackend = {
       pendingDraftCount: questionDrafts.length + (documentQuestionDraft ? 1 : 0) + (wordImportDraft ? 1 : 0),
       databaseHealthy: true,
       appVersion: __APP_VERSION__,
-      license: clone(mockLicense),
     }
-  },
-
-  async getLicenseOverview(): Promise<LicenseOverview> {
-    return clone(mockLicense)
-  },
-
-  async exportLicenseRequest(outputPath: string): Promise<LicenseFileResult> {
-    return { path: outputPath, filename: 'browser-demo.tkreq', bytes: 0 }
-  },
-
-  async importDesktopLicense(_inputPath: string): Promise<LicenseOverview> {
-    return clone(mockLicense)
-  },
-
-  async removeDesktopLicense(): Promise<LicenseOverview> {
-    return clone(mockLicense)
   },
 
   async listQuestionTypes(): Promise<QuestionTypeDefinition[]> {
@@ -1993,8 +1948,8 @@ export const mockBackend = {
     if (existing && existing.rowVersion !== input.rowVersion) {
       taxonomyError('这份试卷已在其他窗口中更新，请重新打开后再操作。', 'PAPER_VERSION_CONFLICT')
     }
-    if (existing?.status === 'saved' && input.status === 'draft') {
-      taxonomyError('已保存的历史试卷不能改回草稿；请使用“再次编辑”创建副本。')
+    if (existing?.status === 'saved') {
+      taxonomyError('历史试卷不能覆盖，请另存为新试卷。', 'PAPER_ARCHIVE_IMMUTABLE')
     }
 
     const saved: Paper = {
@@ -2124,13 +2079,24 @@ export const mockBackend = {
     return questions.find((question) => question.id === id) ?? null
   },
 
+  async getQuestionStemSummaries(ids: string[]) {
+    if (ids.length > 32) throw new Error('每次最多读取 32 道题干')
+    const selected = new Set(ids)
+    return questions.filter((question) => selected.has(question.id) && !question.deletedAt)
+      .map((question) => ({
+        id: question.id,
+        contentVersion: question.contentVersion,
+        stem: { schemaVersion: 1 as const, html: question.stem.html, plainText: question.stem.plainText },
+      }))
+  },
+
   async checkQuestionDuplicate(draft: QuestionDraft): Promise<QuestionDuplicateCheck> {
     validateDuplicateDraft(draft)
     const active = questions
       .filter((question) => !question.deletedAt && question.id !== draft.questionId)
       .sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id))
     const exactKey = normalizedExactQuestion(draft)
-    const exact = active.find((question) => normalizedExactQuestion(question) === exactKey)
+    const exact = canCompareExact(draft) ? active.find((question) => canCompareExact(question) && normalizedExactQuestion(question) === exactKey) : undefined
     if (exact) {
       return {
         status: 'exact',
@@ -2164,7 +2130,7 @@ export const mockBackend = {
       status: best && best.similarityPercent >= SUSPECTED_DUPLICATE_THRESHOLD_PERCENT
         ? 'suspected'
         : 'none',
-      candidate: best ? duplicateCandidate(best.question, best.similarityPercent) : null,
+      candidate: best ? duplicateCandidate(best.question, Math.min(99, best.similarityPercent)) : null,
       evaluatedCandidateCount: candidates.length,
       suspectedThresholdPercent: SUSPECTED_DUPLICATE_THRESHOLD_PERCENT,
       similarityMethod: SIMILARITY_METHOD,
@@ -2186,7 +2152,7 @@ export const mockBackend = {
     for (const [index, entry] of request.items.entries()) {
       if (seenIds.has(entry.clientId)) taxonomyError('批量重复检查的题目标识不能重复。')
       seenIds.add(entry.clientId)
-      const exactFingerprint = normalizedExactQuestion(entry.draft)
+      const exactFingerprint = canCompareExact(entry.draft) ? normalizedExactQuestion(entry.draft) : ''
       const previousIndex = earlierByFingerprint.get(exactFingerprint)
       let check: QuestionDuplicateCheck
       if (request.mode === 'import') {
@@ -2245,7 +2211,7 @@ export const mockBackend = {
                 stemPreview: duplicateStemPreview(previous.draft.stem.plainText),
                 subjectName: '本批导入',
                 chapterName: `第 ${best.index + 1} 题`,
-                similarityPercent: best.similarityPercent,
+                similarityPercent: Math.min(99, best.similarityPercent),
                 contentVersion: 0,
                 sourceKind: 'import-item',
                 sourceOrdinal: best.index + 1,
@@ -2296,7 +2262,7 @@ export const mockBackend = {
           similarityMethod: SIMILARITY_METHOD,
         }
       }
-      if (!earlierByFingerprint.has(exactFingerprint)) earlierByFingerprint.set(exactFingerprint, index)
+      if (exactFingerprint && !earlierByFingerprint.has(exactFingerprint)) earlierByFingerprint.set(exactFingerprint, index)
       results.push({ clientId: entry.clientId, exactFingerprint, check })
     }
     return { items: results }
@@ -2349,6 +2315,7 @@ export const mockBackend = {
     const scopeIds = new Set(scope.map((question) => question.id))
     const exactByKey = new Map<string, Question[]>()
     for (const question of active) {
+      if (!canCompareExact(question)) continue
       const key = normalizedExactQuestion(question)
       const members = exactByKey.get(key) ?? []
       members.push(question)
@@ -2385,7 +2352,7 @@ export const mockBackend = {
         const pairIds = [question.id, candidate.id].sort()
         const pairKey = `${pairIds[0]}:${pairIds[1]}`
         if (seenPairs.has(pairKey)
-          || normalizedExactQuestion(question) === normalizedExactQuestion(candidate)
+          || (canCompareExact(question) && canCompareExact(candidate) && normalizedExactQuestion(question) === normalizedExactQuestion(candidate))
           || isIgnoredDuplicatePair(question, candidate)) {
           continue
         }
@@ -2424,7 +2391,7 @@ export const mockBackend = {
       || second.contentVersion !== request.secondContentVersion) {
       taxonomyError('其中一道题已被修改，请重新查重后再判断。', 'DUPLICATE_PAIR_STALE')
     }
-    if (normalizedExactQuestion(first) === normalizedExactQuestion(second)) {
+    if (canCompareExact(first) && canCompareExact(second) && normalizedExactQuestion(first) === normalizedExactQuestion(second)) {
       taxonomyError('完全重复题不能标记为非重复，请选择保留项并将其余题目移入回收站。', 'DUPLICATE_PAIR_EXACT')
     }
     const pair = canonicalDuplicatePair(first, second)

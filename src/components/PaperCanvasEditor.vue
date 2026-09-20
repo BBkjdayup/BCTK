@@ -54,14 +54,11 @@ import {
   type PaperCanvasImageSource,
 } from '../utils/paperLayout'
 
-const props = withDefaults(defineProps<{
+const props = defineProps<{
   paper: Paper
   templatePreview?: TemplateLayoutPreview | null
   questionTypes?: readonly QuestionTypeDefinition[]
-  canPrint?: boolean
-}>(), {
-  canPrint: true,
-})
+}>()
 const layout = defineModel<PaperLayout | null | undefined>({ required: true })
 const emit = defineEmits<{
   changed: []
@@ -910,13 +907,8 @@ async function insertImage(event: Event) {
 
 async function print() {
   if (!editor || printing.value) return
-  if (!props.canPrint) {
-    ElMessage.warning('基础桌面模式不支持打印，请导入有效的桌面专业版授权。')
-    return
-  }
   printing.value = true
   try {
-    await backend.checkPrintAuthorization()
     captureLayout()
     const options = editor.command.getOptions()
     const pageImages = await editor.command.getImage({
@@ -1164,8 +1156,8 @@ defineExpose({ regenerate, print })
           :disabled="printing || initializing || regenerating"
           @click="regenerate"
         ><Refresh aria-hidden="true" /><span>{{ regenerating ? '正在生成…' : '重新生成' }}</span></button>
-        <button type="button" class="toolbar-print" :disabled="!ready || printing || !canPrint" :title="canPrint ? '打印' : '桌面专业版可打印'" @click="print">
-          <Printer aria-hidden="true" /><span>{{ printing ? '准备打印…' : canPrint ? '打印' : '专业版可打印' }}</span>
+        <button type="button" class="toolbar-print" :disabled="!ready || printing" title="打印" @click="print">
+          <Printer aria-hidden="true" /><span>{{ printing ? '准备打印…' : '打印' }}</span>
         </button>
         <input ref="imageInput" class="hidden-file-input" type="file" accept="image/*" @change="insertImage">
       </div>

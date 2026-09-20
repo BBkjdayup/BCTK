@@ -2,6 +2,8 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { defineComponent, reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import QuestionEditorView from './QuestionEditorView.vue'
+import { plainTextRichContent } from '../utils/richContent'
+import type { QuestionDraft } from '../types/domain'
 
 const mocks = vi.hoisted(() => ({
   leaveGuard: undefined as undefined | (() => Promise<boolean>),
@@ -63,9 +65,6 @@ const appStore = reactive({
     defaultOptions: [],
   }],
   pendingDraftCount: 0,
-  license: {
-    capabilities: { canBatchImport: true },
-  },
 })
 
 const bankStore = reactive({
@@ -165,6 +164,39 @@ afterEach(() => {
 })
 
 describe('QuestionEditorView unsaved-change detection', () => {
+  it('restores an outstanding answer review instead of silently clearing it', async () => {
+    mocks.getQuestionDraft.mockResolvedValueOnce({
+      payload: { type: 'single_choice', stem: plainTextRichContent('题干'), options: [],
+        answer: plainTextRichContent('A，因为原选项正确'), explanation: plainTextRichContent(''),
+        subjectId: 'subject-1', chapterId: 'chapter-1', tagIds: [], answerReviewRequired: true },
+      autosavedAt: 1, stale: false,
+    })
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.get('.answer-review').text()).toContain('已核对答案')
+    wrapper.unmount()
+  })
+  it('keeps correct option identity when moved and persists the review flag after deletion', async () => {
+    const wrapper = mountView()
+    await flushPromises()
+    const state = (wrapper.vm as unknown as { $: { setupState: {
+      draft: QuestionDraft; moveOption: (a: number, b: number) => void;
+      removeOption: (index: number) => void; autosave: () => Promise<boolean>
+    } } }).$.setupState
+    state.draft.stem = plainTextRichContent('请选择正确答案')
+    state.draft.options = ['正确', '错误', '另一错误'].map((text, position) => ({
+      id: `option-${position}`, position, content: plainTextRichContent(text),
+    }))
+    state.draft.answer = plainTextRichContent('A')
+    state.moveOption(0, 1)
+    expect(state.draft.answer.plainText).toBe('B')
+    state.removeOption(1)
+    expect(state.draft.answerReviewRequired).toBe(true)
+    expect(state.draft.answer.plainText).toBe('')
+    await state.autosave()
+    expect(mocks.saveQuestionDraft.mock.calls.at(-1)?.[0].answerReviewRequired).toBe(true)
+    wrapper.unmount()
+  })
   it('waits for an in-flight autosave and then persists edits made during that write', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     let finishFirst!: (value: { autosavedAt: number }) => void

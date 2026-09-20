@@ -111,7 +111,6 @@ function mountDialog(excludedQuestionIds = ['018f4b00-0000-7000-8000-00000000001
       tags,
       questionTypes,
       excludedQuestionIds,
-      remainingCapacity: null,
     },
     global: {
       stubs: {

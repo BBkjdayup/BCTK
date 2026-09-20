@@ -8,12 +8,14 @@ const mocks = vi.hoisted(() => ({
   listTemplates: vi.fn(),
   getSettings: vi.fn(),
   routerPush: vi.fn(),
+  exportPaperDocx: vi.fn(),
 }))
 
 vi.mock('../services/backend', () => ({
   backend: {
     listTemplates: mocks.listTemplates,
     getSettings: mocks.getSettings,
+    exportPaperDocx: mocks.exportPaperDocx,
   },
   isDesktopRuntime: () => true,
 }))
@@ -92,12 +94,13 @@ const paper: Paper = {
   updatedAt: 1,
 }
 
-function mountDialog() {
+function mountDialog(overrides: Record<string, unknown> = {}) {
   return mount(PaperExportDialog, {
     props: {
       modelValue: true,
       paper,
       preparePaper: vi.fn(),
+      ...overrides,
     },
     global: {
       directives: { loading: () => undefined },
@@ -125,6 +128,42 @@ beforeEach(() => {
 })
 
 describe('PaperExportDialog', () => {
+  it('passes export-only choices separately from the persisted paper snapshot', async () => {
+    const content = { schemaVersion: 1 as const, html: '<p>内容</p>', plainText: '内容' }
+    const stored: Paper = { ...paper, status: 'saved', items: [{
+      id: 'item-1', sourceQuestionId: 'question-1', position: 0, snapshot: {
+        id: 'question-1', type: 'short_answer', stem: content, options: [], answer: content, explanation: content,
+        subjectId: 'subject-1', chapterId: 'chapter-1', subjectName: '学科', chapterName: '章节',
+        tags: [], contentVersion: 1, createdAt: 1, updatedAt: 1,
+      },
+    }] }
+    const before = JSON.stringify(stored)
+    let finish!: (value: Paper) => void
+    const preparePaper = vi.fn(() => new Promise<Paper>((resolve) => { finish = resolve }))
+    mocks.exportPaperDocx.mockResolvedValue({ exported: false, diagnostics: [] })
+    const wrapper = mountDialog({ paper: stored, preparePaper })
+    await flushPromises()
+    const vm = wrapper.vm as any
+    vm.paperTitle = '本次导出标题'
+    vm.outputPath = 'C:\\isolated-test\\export.docx'
+    await nextTick()
+    const exporting = vm.exportPaper()
+    await nextTick()
+    expect(preparePaper).toHaveBeenCalledOnce()
+    // Edits to the form while preparation is pending must not change this export.
+    vm.paperTitle = '后续标题'
+    vm.outputPath = 'C:\\isolated-test\\later.docx'
+    finish(stored)
+    await exporting
+    expect(mocks.exportPaperDocx).toHaveBeenCalledWith({
+      paperId: stored.id, expectedPaperRowVersion: stored.rowVersion,
+      templateId: template.id, outputPath: 'C:\\isolated-test\\export.docx',
+      title: '本次导出标题', contentMode: 'paper_only',
+    })
+    expect(JSON.stringify(stored)).toBe(before)
+    wrapper.unmount()
+  })
+
   it('loads and selects templates when initially mounted open', async () => {
     const wrapper = mountDialog()
     await flushPromises()

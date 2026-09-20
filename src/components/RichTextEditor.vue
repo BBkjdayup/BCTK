@@ -17,6 +17,7 @@ import type { RichContent } from '../types/domain'
 import type { ContextMenuItem } from '../types/contextMenu'
 import {
   richContentToTiptapDocument,
+  richContentSearchText,
   TIPTAP_CONTENT_EDITOR_VERSION,
 } from '../utils/richContent'
 import { renderMathInto } from '../utils/mathRendering'
@@ -276,6 +277,9 @@ const MathNode = Node.create({
       title: node.attrs.latex,
     }, node.attrs.latex]
   },
+  renderText({ node }) {
+    return String(node.attrs.latex ?? '').trim()
+  },
   addNodeView() {
     return ({ node }) => {
       const dom = document.createElement('span')
@@ -390,7 +394,7 @@ function syncModel() {
     editorVersion: TIPTAP_CONTENT_EDITOR_VERSION,
     document: document as Record<string, unknown>,
     html,
-    plainText: instance.getText().trim(),
+    plainText: richContentSearchText({ schemaVersion: 2, document, html, plainText: '' }),
   }
   void hydrateManagedImages()
 }

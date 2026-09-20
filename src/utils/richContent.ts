@@ -1,7 +1,7 @@
 import type { JSONContent } from '@tiptap/core'
 import type { RichContent } from '../types/domain'
 
-export const TIPTAP_CONTENT_EDITOR_VERSION = '3.28.0'
+export const TIPTAP_CONTENT_EDITOR_VERSION = '3.31.0'
 
 export const EMPTY_TIPTAP_DOCUMENT: JSONContent = {
   type: 'doc',
@@ -75,4 +75,46 @@ export function richContentToTiptapDocument(content: RichContent): JSONContent |
       content: [{ type: 'text', text: content.plainText }],
     }],
   }
+}
+
+/** Search text includes the actual LaTeX, never a synthetic nonempty marker. */
+const legacyTextCache = new WeakMap<RichContent, { html: string; text: string }>()
+
+export function richContentSearchText(content: RichContent): string {
+  if (content.schemaVersion === 2 && content.document) {
+    const read = (node: JSONContent): string => {
+      if (node.type === 'text') return node.text ?? ''
+      if (node.type === 'mathNode') return String(node.attrs?.latex ?? '').trim()
+      if (node.type === 'image') return String(node.attrs?.alt ?? '')
+      if (node.type === 'hardBreak') return '\n'
+      const text = (node.content ?? []).map(read).join('')
+      return ['paragraph', 'heading', 'tableCell', 'tableHeader'].includes(node.type ?? '') ? `${text}\n` : text
+    }
+    return read(content.document as JSONContent).trim()
+  }
+  if (!content.html.trim()) return content.plainText.trim()
+  const cached = legacyTextCache.get(content)
+  if (cached?.html === content.html) return cached.text
+  const doc = new DOMParser().parseFromString(content.html, 'text/html')
+  doc.querySelectorAll('[data-latex]').forEach((node) => {
+    node.replaceWith(doc.createTextNode(node.getAttribute('data-latex')?.trim() ?? ''))
+  })
+  doc.querySelectorAll('img').forEach((node) => node.replaceWith(doc.createTextNode(node.alt)))
+  doc.querySelectorAll('br').forEach((node) => node.replaceWith(doc.createTextNode('\n')))
+  const text = (doc.body.textContent ?? '').trim()
+  legacyTextCache.set(content, { html: content.html, text })
+  return text
+}
+
+export function hasMeaningfulRichContent(content: RichContent): boolean {
+  if (richContentSearchText(content).replace(/[\s\u200b\ufeff]/gu, '')) return true
+  if (content.schemaVersion === 2 && content.document) {
+    const hasImage = (node: JSONContent): boolean => (
+      node.type === 'image' && Boolean(String(node.attrs?.resourceId ?? '').trim())
+    ) || (node.content ?? []).some(hasImage)
+    return hasImage(content.document as JSONContent)
+  }
+  const doc = new DOMParser().parseFromString(content.html, 'text/html')
+  return [...doc.querySelectorAll('img[data-resource-id]')]
+    .some((node) => Boolean(node.getAttribute('data-resource-id')?.trim()))
 }

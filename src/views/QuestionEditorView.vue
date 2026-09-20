@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { type UnlistenFn } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { registerCloseGuard } from '../services/closeProtection'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, Check, DocumentAdd, UploadFilled } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
@@ -19,7 +19,8 @@ import {
   type RichContent,
 } from '../types/domain'
 import { clonePlain } from '../utils/clonePlain'
-import { emptyRichContent, plainTextRichContent } from '../utils/richContent'
+import { emptyRichContent, plainTextRichContent, hasMeaningfulRichContent } from '../utils/richContent'
+import { remapChoiceAnswer } from '../utils/choiceAnswer'
 import { enabledQuestionTypes, isChoiceQuestionType, questionTypeLabel } from '../utils/questionTypes'
 import { resolveTaxonomyDefault } from '../utils/taxonomyDefaults'
 
@@ -101,17 +102,6 @@ function touch() {
 
 function serializeDraft() {
   return JSON.stringify({ ...draft, options: [...draft.options] })
-}
-
-function hasMeaningfulRichContent(content: RichContent) {
-  if (content.plainText.trim()) return true
-  const visibleHtml = content.html
-    .replace(/<br\s*\/?\s*>/giu, '')
-    .replace(/&nbsp;|&#160;|&#x0*a0;/giu, ' ')
-    .replace(/<[^>]+>/gu, '')
-    .trim()
-  if (visibleHtml) return true
-  return /<(?:img|table|hr)\b|data-latex\s*=/iu.test(content.html)
 }
 
 function hasMeaningfulQuestionContent(value: QuestionDraft) {
@@ -241,7 +231,7 @@ async function offerDraftRecovery() {
     // Rebase only the lock version; the recovered content itself is unchanged.
     recovered.baseContentVersion = currentQuestionVersion.value
   }
-  Object.assign(draft, recovered)
+  Object.assign(draft, { answerReviewRequired: false }, recovered)
   if (isCopying.value) await router.replace('/questions/new')
   dirty.value = true
   lastAutosavedSnapshot = saved.stale ? null : serializeDraft()
@@ -256,6 +246,7 @@ async function load() {
       return
     }
     Object.assign(draft, {
+      answerReviewRequired: false,
       questionId: question.id,
       type: question.type,
       stem: clonePlain(question.stem),
@@ -286,6 +277,7 @@ async function load() {
       copiedOptions[index]?.id,
     ]))
     Object.assign(draft, {
+      answerReviewRequired: false,
       type: question.type,
       stem: clonePlain(question.stem),
       options: copiedOptions,
@@ -346,10 +338,6 @@ watch(
   { flush: 'post' },
 )
 
-function isTauriRuntime() {
-  return '__TAURI_INTERNALS__' in window
-}
-
 function warnBeforeBrowserClose(event: BeforeUnloadEvent) {
   if (!dirty.value || !hasMeaningfulQuestionContent(draft)) return
   event.preventDefault()
@@ -357,37 +345,19 @@ function warnBeforeBrowserClose(event: BeforeUnloadEvent) {
 }
 
 async function registerCloseProtection() {
-  if (!isTauriRuntime()) {
-    window.addEventListener('beforeunload', warnBeforeBrowserClose)
-    return
-  }
-
-  try {
-    unlistenCloseRequested = await getCurrentWindow().onCloseRequested(async (event) => {
-      if (!dirty.value) return
-      if (!hasMeaningfulQuestionContent(draft)) {
-        if (!hasPersistedDraft.value) return
-        event.preventDefault()
-        if (await autosave()) await getCurrentWindow().destroy()
-        return
-      }
-      event.preventDefault()
-      try {
-        await ElMessageBox.confirm('当前题目还有未保存的修改。关闭软件前先保存本地草稿吗？', '关闭软件', {
-          type: 'warning',
-          confirmButtonText: '保存草稿并关闭',
-          cancelButtonText: '继续编辑',
-          closeOnClickModal: false,
-        })
-        if (await autosave()) await getCurrentWindow().destroy()
-      } catch {
-        // The teacher chose to keep editing, so the close request stays cancelled.
-      }
-    })
-  } catch {
-    // Keep the browser-level protection as a fallback if window events are unavailable.
-    window.addEventListener('beforeunload', warnBeforeBrowserClose)
-  }
+  window.addEventListener('beforeunload', warnBeforeBrowserClose)
+  unlistenCloseRequested = registerCloseGuard(async () => {
+    if (!dirty.value) return true
+    if (!hasMeaningfulQuestionContent(draft)) {
+      return !hasPersistedDraft.value || await autosave()
+    }
+    try {
+      await ElMessageBox.confirm('当前题目还有未保存的修改。关闭软件前先保存本地草稿吗？', '关闭软件', {
+        type: 'warning', confirmButtonText: '保存草稿并关闭', cancelButtonText: '继续编辑', closeOnClickModal: false,
+      })
+      return await autosave()
+    } catch { return false }
+  })
 }
 
 onMounted(() => {
@@ -432,6 +402,7 @@ function onKeydown(event: KeyboardEvent) {
 }
 
 function onTypeChanged() {
+  const before = [...draft.options]
   const defaults = appStore.questionTypes.find((definition) => definition.code === draft.type)?.defaultOptions ?? []
   if (isJudgment.value && defaults.length >= 2) {
     draft.options = defaults.map((content, position) => ({
@@ -447,6 +418,9 @@ function onTypeChanged() {
   if (!needsOptions.value) {
     draft.options = []
     draft.resourceRefs = (draft.resourceRefs ?? []).filter((entry) => entry.contentSlot !== 'option')
+    draft.answerReviewRequired = false
+  } else if (before.length !== draft.options.length || before.some((option, index) => draft.options[index]?.id !== option.id)) {
+    syncOptionAnswer(before)
   }
   touch()
 }
@@ -479,22 +453,48 @@ function removeOption(index: number) {
     ElMessage.warning('选择题至少需要两个选项')
     return
   }
+  const before = [...draft.options]
   const removed = draft.options[index]
   draft.options.splice(index, 1)
   if (removed) {
     draft.resourceRefs = (draft.resourceRefs ?? []).filter((entry) => entry.optionId !== removed.id)
   }
   draft.options.forEach((option, position) => { option.position = position })
+  syncOptionAnswer(before)
   touch()
 }
 
 function moveOption(source: number, target: number) {
   if (source === target || source < 0 || target < 0) return
   if (source >= draft.options.length || target >= draft.options.length) return
+  const before = [...draft.options]
   const [item] = draft.options.splice(source, 1)
   if (!item) return
   draft.options.splice(target, 0, item)
   draft.options.forEach((option, position) => { option.position = position })
+  syncOptionAnswer(before)
+  touch()
+}
+
+function syncOptionAnswer(before: QuestionOption[]) {
+  if (draft.answerReviewRequired) return
+  const result = remapChoiceAnswer(before, draft.options, draft.answer)
+  draft.answer = result.answer
+  draft.answerReviewRequired = result.reviewRequired
+  if (result.reviewRequired) ElMessage.warning('选项已变化，请按当前顺序重新填写或核对答案，并确认后再保存。')
+}
+
+function confirmOptionAnswer() {
+  if (!hasMeaningfulRichContent(draft.answer)) {
+    ElMessage.warning('请先填写当前选项对应的正确答案')
+    return
+  }
+  const mapped = remapChoiceAnswer(draft.options, draft.options, draft.answer)
+  if (mapped.reviewRequired && !hasMeaningfulRichContent(mapped.answer)) {
+    ElMessage.warning('答案字母超出了当前选项范围，请重新填写')
+    return
+  }
+  draft.answerReviewRequired = false
   touch()
 }
 
@@ -527,9 +527,10 @@ function validate() {
   if (!draft.type) return '请选择题型'
   if (!draft.subjectId) return '请选择学科'
   if (!draft.chapterId) return '请选择章节'
-  if (!draft.stem.plainText.trim()) return '请填写题干'
-  if (!draft.answer.plainText.trim()) return '请填写答案'
-  if (needsOptions.value && draft.options.some((option) => !option.content.plainText.trim())) return '选择题的选项不能为空'
+  if (!hasMeaningfulRichContent(draft.stem)) return '请填写题干'
+  if (!hasMeaningfulRichContent(draft.answer)) return '请填写答案'
+  if (draft.answerReviewRequired) return '选项已变化，请先核对并确认答案'
+  if (needsOptions.value && draft.options.some((option) => !hasMeaningfulRichContent(option.content))) return '选择题的选项不能为空'
   return null
 }
 
@@ -615,20 +616,18 @@ async function save() {
         <el-button
           v-if="!isEditing && !isCopying"
           :icon="DocumentAdd"
-          :disabled="!appStore.license.capabilities.canBatchImport"
-          :title="appStore.license.capabilities.canBatchImport ? '文档式批量录入' : '桌面专业版可使用批量录入'"
+          :title="'文档式批量录入'"
           @click="router.push('/questions/document')"
-        >{{ appStore.license.capabilities.canBatchImport ? '文档式批量录入' : '专业版批量录入' }}</el-button>
+        >{{ '文档式批量录入' }}</el-button>
         <el-button
           v-if="!isEditing && !isCopying"
           :icon="UploadFilled"
-          :disabled="!appStore.license.capabilities.canBatchImport"
-          :title="appStore.license.capabilities.canBatchImport ? 'Word / Excel 批量导入' : '桌面专业版可使用批量导入'"
+          :title="'Word / Excel 批量导入'"
           @click="router.push({
             path: '/word-import',
             query: { subjectId: draft.subjectId, chapterId: draft.chapterId },
           })"
-        >{{ appStore.license.capabilities.canBatchImport ? 'Word / Excel 批量导入' : '专业版批量导入' }}</el-button>
+        >{{ 'Word / Excel 批量导入' }}</el-button>
         <el-button type="primary" :icon="Check" :loading="saving" @click="save">保存题目</el-button>
       </div>
     </div>
@@ -700,6 +699,10 @@ async function save() {
       <div class="editor-grid editor-grid--content">
         <div class="form-section">
           <label>答案 <span>*</span></label>
+          <div v-if="draft.answerReviewRequired" class="answer-review" role="alert">
+            选项顺序或内容已变化，请按当前选项核对答案。
+            <el-button size="small" type="warning" @click="confirmOptionAnswer">已核对答案</el-button>
+          </div>
           <RichTextEditor
             v-model="draft.answer"
             placeholder="请输入标准答案；选择题可填写 A 或 A、B、C"
@@ -765,6 +768,7 @@ async function save() {
 </template>
 
 <style scoped>
+.answer-review { display: flex; align-items: center; gap: 12px; padding: 10px; margin-top: 8px; color: #92400e; background: #fffbeb; border-radius: 6px; }
 .editor-page {
   height: 100%;
 }

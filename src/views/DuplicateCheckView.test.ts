@@ -1,6 +1,6 @@
-import { flushPromises, mount } from '@vue/test-utils'
-import { reactive } from 'vue'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { enableAutoUnmount, flushPromises, mount } from '@vue/test-utils'
+import { reactive, type VNode } from 'vue'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { QuestionDuplicateGroup, QuestionDuplicateScanResult } from '../types/domain'
 import DuplicateCheckView from './DuplicateCheckView.vue'
 
@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   ignoreQuestionDuplicate: vi.fn().mockResolvedValue(undefined),
   moveQuestionsToRecycle: vi.fn().mockResolvedValue(undefined),
   getQuestion: vi.fn().mockResolvedValue(null),
+  getQuestionStemSummaries: vi.fn(),
   refreshTaxonomy: vi.fn().mockResolvedValue(undefined),
   confirm: vi.fn().mockResolvedValue('confirm'),
   success: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock('../services/backend', () => ({
     ignoreQuestionDuplicate: mocks.ignoreQuestionDuplicate,
     moveQuestionsToRecycle: mocks.moveQuestionsToRecycle,
     getQuestion: mocks.getQuestion,
+    getQuestionStemSummaries: mocks.getQuestionStemSummaries,
   },
 }))
 
@@ -126,6 +128,14 @@ function mountView() {
   })
 }
 
+enableAutoUnmount(afterEach)
+beforeEach(() => {
+  mocks.getQuestionStemSummaries.mockImplementation(async (ids: string[]) => ids.map((id) => ({
+    id, contentVersion: id === 'question-1' ? 3 : 4,
+    stem: { schemaVersion: 1, html: '<p>完整题干</p>', plainText: '完整题干' },
+  })))
+})
+
 afterEach(() => {
   vi.clearAllMocks()
   route.query = { subjectId: 'subject-1', chapterId: 'chapter-1' }
@@ -135,6 +145,59 @@ afterEach(() => {
 })
 
 describe('DuplicateCheckView', () => {
+  it.each(['exact', 'suspected'] as const)('renders complete formulas in %s results and the retention dialog', async (kind) => {
+    const data = result(kind)
+    const groups = kind === 'exact' ? data.exactGroups : data.suspectedGroups
+    groups[0]!.members.forEach((item) => { item.stemPreview = String.raw`675^{\circ}…` })
+    mocks.scanQuestionDuplicates.mockResolvedValue(data)
+    mocks.getQuestionStemSummaries.mockImplementation(async (ids: string[]) => ids.map((id) => ({
+      id, contentVersion: id === 'question-1' ? 3 : 4,
+      stem: { schemaVersion: 1,
+        html: String.raw`<p><span class="math-node" data-latex="675^{\circ}">675^{\circ}</span>用弧度制表示为 <span class="math-node" data-latex="\frac{15\pi}{4}">公式</span></p>`,
+        plainText: String.raw`675^{\circ}用弧度制表示为`,
+      },
+    })))
+    const wrapper = mountView()
+    await flushPromises()
+    expect(wrapper.findAll('.katex')).toHaveLength(4)
+    expect(wrapper.findAll('.frac-line')).toHaveLength(2)
+    expect(wrapper.find('.katex-html').text()).toContain('∘')
+    expect(mocks.getQuestion).not.toHaveBeenCalled()
+    const recycle = wrapper.findAll('button').find((button) => button.text().includes('其余移入回收站'))!
+    await recycle.trigger('click')
+    await flushPromises()
+    const node = mocks.confirm.mock.calls[0]![0] as VNode
+    const dialog = mount({ render: () => node })
+    await flushPromises()
+    expect(dialog.findAll('.katex')).toHaveLength(2)
+    expect(dialog.text()).toContain('其余 1 道题移入回收站')
+  })
+
+  it('does not recycle when the scanned question has changed', async () => {
+    mocks.scanQuestionDuplicates.mockResolvedValue(result('exact'))
+    mocks.getQuestionStemSummaries.mockResolvedValue([])
+    const wrapper = mountView()
+    await flushPromises()
+    const recycle = wrapper.findAll('button').find((button) => button.text().includes('其余移入回收站'))!
+    await recycle.trigger('click')
+    await flushPromises()
+    expect(mocks.confirm).not.toHaveBeenCalled()
+    expect(mocks.moveQuestionsToRecycle).not.toHaveBeenCalled()
+    expect(wrapper.text()).toContain('题目已修改或移除')
+  })
+
+  it('does not recycle when confirmation is cancelled', async () => {
+    mocks.scanQuestionDuplicates.mockResolvedValue(result('exact'))
+    mocks.confirm.mockRejectedValueOnce('cancel')
+    const wrapper = mountView()
+    await flushPromises()
+    const recycle = wrapper.findAll('button').find((button) => button.text().includes('其余移入回收站'))!
+    await recycle.trigger('click')
+    await flushPromises()
+    expect(mocks.confirm).toHaveBeenCalled()
+    expect(mocks.moveQuestionsToRecycle).not.toHaveBeenCalled()
+  })
+
   it('scans the selected scope and automatically shows the only non-empty tab', async () => {
     mocks.scanQuestionDuplicates.mockResolvedValue(result('suspected'))
     const wrapper = mountView()

@@ -27,7 +27,6 @@ const props = defineProps<{
   tags: Tag[]
   questionTypes: QuestionTypeDefinition[]
   excludedQuestionIds: string[]
-  remainingCapacity: number | null
 }>()
 
 const emit = defineEmits<{
@@ -147,10 +146,6 @@ async function drawAndAdd() {
     ElMessage.warning(countMode.value === 'total'
       ? '请输入需要随机抽取的题量。'
       : '请先为至少一种题型填写需要抽取的题量。')
-    return
-  }
-  if (props.remainingCapacity !== null && requested > props.remainingCapacity) {
-    ElMessage.warning(`当前试卷还能加入 ${props.remainingCapacity} 道题，请减少本次抽取题量。`)
     return
   }
   if (requested > MAX_RANDOM_DRAW_QUESTIONS) {

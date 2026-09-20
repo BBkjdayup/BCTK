@@ -4,7 +4,6 @@ import { backend } from '../services/backend'
 import type { BootstrapData, PageResult, Question, QuestionDraft } from '../types/domain'
 import { useAppStore } from './app'
 import { createQuestionFilters, useQuestionBankStore } from './questionBank'
-import { basicLicenseOverview } from '../utils/licensing'
 
 const refreshedBootstrap: BootstrapData = {
   initialized: true,
@@ -27,7 +26,6 @@ const refreshedBootstrap: BootstrapData = {
   pendingDraftCount: 0,
   databaseHealthy: true,
   appVersion: '0.1.0',
-  license: basicLicenseOverview('test-device'),
 }
 
 describe('question bank filter isolation', () => {

@@ -25,6 +25,7 @@
 
 - `cfb` 0.14 is used only to read the `Equation Native` stream inside an OLE Compound File. It is distributed under the MIT License; Copyright (c) 2017 Matthew Steele.
 - KaTeX 0.18.1 renders the converted editable LaTeX formulas inside the application. KaTeX is distributed under the MIT License; Copyright (c) 2013-2020 Khan Academy and other contributors.
+- `html-to-image` 1.11.13 renders local KaTeX nodes to PNG for mini-program publication. It is distributed under the MIT License; Copyright (c) 2017-2025 W.Y.
 - The MathType converter in this project is an independent, bounded implementation of the published MTEF 5 file format. It does not bundle or invoke MathType, the MathType SDK, Microsoft Office, WPS Office, or LibreOffice, and it never activates embedded OLE objects.
 
 ## Rich DOCX export

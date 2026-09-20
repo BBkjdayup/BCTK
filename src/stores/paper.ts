@@ -1,10 +1,13 @@
+import { paperLayoutSourceSignature } from '../utils/paperSourceSignature'
 import { defineStore } from 'pinia'
-import { computed, ref } from 'vue'
+import { computed, ref, watch, onScopeDispose } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
 import {
   QUESTION_TYPES,
   type Paper,
+  type PaperRecovery,
   type PaperFilters,
   type PaperItem,
   type PaperSummary,
@@ -12,9 +15,9 @@ import {
   type QuestionType,
 } from '../types/domain'
 import { clonePlain } from '../utils/clonePlain'
-import { remainingPaperCapacity } from '../utils/licensing'
 import { fetchAllPaperSummaries, PAPER_HISTORY_PAGE_SIZE } from '../utils/paperHistory'
 import { replacePaperItem } from '../utils/paperSelection'
+import { reidentifyPaper } from '../utils/paperArchive'
 
 const questionTypeOrder = new Map<string, number>(QUESTION_TYPES.map((type, index) => [type, index]))
 
@@ -167,6 +170,181 @@ export const usePaperStore = defineStore('paper', () => {
   const saving = ref(false)
   const historyLoading = ref(false)
   const error = ref<string | null>(null)
+  const savedSignature = ref(paperEditableSignature(current.value))
+  const isDirty = computed(() => paperEditableSignature(current.value) !== savedSignature.value)
+  const transitioning = ref(false)
+  const recoveryReady = ref(false)
+  const pendingRecovery = ref<PaperRecovery | null>(null)
+  const recoveryError = ref<string | null>(null)
+  const recoverySavedAt = ref<number | null>(null)
+  let recoveryRevision: string | null = null
+  let checkpointSignature = ''
+  let recoveryQueue: Promise<unknown> = Promise.resolve()
+  let saveInFlight: Promise<Paper> | null = null
+  let promptOpen = false
+  let recoveryTimer: ReturnType<typeof setTimeout> | undefined
+  let recoveryInterval: ReturnType<typeof setInterval> | undefined
+
+  function queueRecovery<T>(work: () => Promise<T>): Promise<T> {
+    const task = recoveryQueue.then(work)
+    recoveryQueue = task.catch(() => undefined)
+    return task
+  }
+
+  async function checkpoint() {
+    if (!recoveryReady.value || pendingRecovery.value) return
+    await queueRecovery(async () => {
+      if (!isDirty.value || transitioning.value) return
+      const signature = paperEditableSignature(current.value)
+      if (signature === checkpointSignature) return
+      try {
+        const record = await backend.savePaperRecovery(clonePlain(current.value))
+        recoveryRevision = record.revision
+        checkpointSignature = signature
+        recoverySavedAt.value = record.autosavedAt
+        recoveryError.value = null
+      } catch (reason) {
+        recoveryError.value = errorMessage(reason, '试卷恢复草稿保存失败，请手动保存后再退出')
+        throw reason
+      }
+    })
+  }
+
+  async function clearRecovery() {
+    await queueRecovery(async () => {
+      if (recoveryRevision) await backend.clearPaperRecovery(recoveryRevision)
+      recoveryRevision = null
+      checkpointSignature = ''
+      recoverySavedAt.value = null
+    })
+  }
+
+  async function initializeRecovery() {
+    if (recoveryReady.value) return
+    try {
+      pendingRecovery.value = await backend.getPaperRecovery()
+      recoveryReady.value = true
+      recoveryInterval = setInterval(() => { void checkpoint().catch(() => undefined) }, 30_000)
+      if (!pendingRecovery.value) await checkpoint()
+    } catch (reason) {
+      recoveryError.value = errorMessage(reason, '读取试卷恢复草稿失败，自动保存暂未启动')
+    }
+  }
+
+  async function recoverPaper() {
+    const record = pendingRecovery.value
+    if (!record || transitioning.value) return false
+    transitioning.value = true
+    try {
+      if (!(await confirmLeave('恢复上次试卷'))) return false
+      // Recover as a fresh draft: the original history row may have been edited
+      // or deleted since the crash. Never overwrite it with an old row version.
+      const recovered = normalizePaper(clonePlain(record.paper))
+      const oldSignature = paperLayoutSourceSignature(recovered)
+      const itemIds = new Map(recovered.items.map((item) => [item.id, crypto.randomUUID()]))
+      recovered.id = crypto.randomUUID()
+      recovered.items = recovered.items.map((item) => ({ ...item, id: itemIds.get(item.id)! }))
+      if (recovered.layout) {
+        const pending: unknown[] = [recovered.layout.data]
+        while (pending.length) {
+          const node = pending.pop()
+          if (!node || typeof node !== 'object') continue
+          const record = node as Record<string, unknown>
+          if (typeof record.paperItemId === 'string' && itemIds.has(record.paperItemId)) record.paperItemId = itemIds.get(record.paperItemId)!
+          pending.push(...Object.values(record))
+        }
+        if (recovered.layout.sourceSignature === oldSignature) recovered.layout.sourceSignature = paperLayoutSourceSignature(recovered)
+      }
+      recovered.status = 'draft'
+      recovered.rowVersion = 0
+      recovered.savedAt = null
+      recovered.lastSavedAt = null
+      recovered.createdAt = Date.now()
+      current.value = recovered
+      savedSignature.value = ''
+      recoveryRevision = record.revision
+      pendingRecovery.value = null
+      return true
+    } finally {
+      transitioning.value = false
+      await checkpoint().catch(() => undefined)
+    }
+  }
+
+  async function discardPendingRecovery() {
+    const record = pendingRecovery.value
+    if (!record) return
+    try {
+      await ElMessageBox.confirm('确定丢弃上次未保存的试卷草稿吗？', '丢弃恢复草稿', {
+        type: 'warning', confirmButtonText: '丢弃草稿', cancelButtonText: '取消',
+      })
+    } catch { return }
+    await queueRecovery(() => backend.clearPaperRecovery(record.revision))
+    pendingRecovery.value = null
+    await checkpoint()
+  }
+
+  watch(() => paperEditableSignature(current.value), () => {
+    clearTimeout(recoveryTimer)
+    recoveryTimer = setTimeout(() => { void checkpoint().catch(() => undefined) }, 1000)
+  })
+  onScopeDispose(() => {
+    clearTimeout(recoveryTimer)
+    clearInterval(recoveryInterval)
+  })
+
+  async function confirmLeave(action: string): Promise<boolean> {
+    if (promptOpen) return false
+    promptOpen = true
+    try {
+      if (saveInFlight) await saveInFlight
+      if (!isDirty.value) return true
+      const signature = paperEditableSignature(current.value)
+      try {
+        await ElMessageBox.confirm(`当前试卷“${current.value.title || '未命名试卷'}”还有未保存的修改。${action}前如何处理？右上角关闭或 Esc 可取消操作。`, '未保存的试卷', {
+          type: 'warning', confirmButtonText: '保存并继续', cancelButtonText: '放弃修改',
+          distinguishCancelAndClose: true, closeOnClickModal: false,
+        })
+      } catch (action) {
+        return action === 'cancel' && signature === paperEditableSignature(current.value)
+      }
+      await save(current.value.status)
+      if (isDirty.value) {
+        ElMessage.warning('保存期间又有修改，请核对并保存后继续。')
+        return false
+      }
+      return true
+    } catch (reason) {
+      ElMessage.error(errorMessage(reason, '试卷未能保存，已保留当前编辑内容'))
+      return false
+    } finally { promptOpen = false }
+  }
+
+  async function prepareToClose() {
+    if (transitioning.value || !(await confirmLeave('关闭软件'))) return false
+    const signature = paperEditableSignature(current.value)
+    await clearRecovery()
+    return signature === paperEditableSignature(current.value)
+  }
+
+  async function replaceCurrent(loadNext: () => Paper | Promise<Paper>): Promise<Paper | null> {
+    if (transitioning.value) return null
+    transitioning.value = true
+    try {
+      if (!(await confirmLeave('切换试卷'))) return null
+      const signature = paperEditableSignature(current.value)
+      const next = normalizePaper(await loadNext())
+      if (signature !== paperEditableSignature(current.value)) return null
+      await clearRecovery()
+      if (signature !== paperEditableSignature(current.value)) return null
+      current.value = next
+      savedSignature.value = paperEditableSignature(next)
+      return next
+    } finally {
+      transitioning.value = false
+      void checkpoint().catch(() => undefined)
+    }
+  }
 
   const selectedQuestionIds = computed(() => new Set(
     current.value.items
@@ -178,12 +356,10 @@ export const usePaperStore = defineStore('paper', () => {
     current.value.updatedAt = Date.now()
   }
 
-  function addQuestions(questions: Question[], maxQuestions: number | null = null) {
+  function addQuestions(questions: Question[]) {
     const selectedIds = new Set(selectedQuestionIds.value)
     const additions: PaperItem[] = []
-    const remaining = remainingPaperCapacity(current.value.items.length, maxQuestions)
     for (const question of questions) {
-      if (additions.length >= remaining) break
       if (selectedIds.has(question.id)) continue
       selectedIds.add(question.id)
       additions.push({
@@ -235,16 +411,28 @@ export const usePaperStore = defineStore('paper', () => {
     touch()
   }
 
-  function newPaper() {
-    current.value = emptyPaper()
+  async function newPaper() {
+    return (await replaceCurrent(emptyPaper)) !== null
   }
 
-  async function save(status: Paper['status']) {
+  function save(status: Paper['status']): Promise<Paper> {
+    if (saveInFlight) return saveInFlight.then(() => save(status))
+    const task = performSave(status)
+    saveInFlight = task
+    const finish = () => { if (saveInFlight === task) saveInFlight = null }
+    void task.then(finish, finish)
+    return task
+  }
+
+  async function performSave(status: Paper['status']) {
+    if (current.value.rowVersion > 0 && current.value.status === status && !isDirty.value) {
+      return clonePlain(current.value)
+    }
     saving.value = true
     error.value = null
     try {
       current.value.items = normalizePaperItems(current.value.items)
-      const draft: Paper = {
+      let draft: Paper = {
         ...clonePlain(current.value),
         title: current.value.title.trim().normalize('NFKC').trim() || '未命名试卷',
         status,
@@ -252,6 +440,16 @@ export const usePaperStore = defineStore('paper', () => {
       }
       const paperId = current.value.id
       const editableAtRequest = paperEditableSignature(current.value)
+      const fork = current.value.status === 'saved' && current.value.rowVersion > 0
+      const itemIds = new Map<string, string>()
+      if (fork) {
+        draft.items.forEach((item) => itemIds.set(item.id, crypto.randomUUID()))
+        draft = reidentifyPaper(draft, crypto.randomUUID(), itemIds)
+        draft.rowVersion = 0
+        draft.createdAt = Date.now()
+        draft.savedAt = null
+        draft.lastSavedAt = null
+      }
       const saved = normalizePaper(await backend.savePaper(draft))
 
       // The backend response represents the snapshot sent above. If the
@@ -261,8 +459,11 @@ export const usePaperStore = defineStore('paper', () => {
       if (current.value.id !== paperId) return saved
       current.value = paperEditableSignature(current.value) === editableAtRequest
         ? saved
-        : mergeSavedPaperMetadata(current.value, saved)
-      return current.value
+        : mergeSavedPaperMetadata(fork ? reidentifyPaper(current.value, saved.id, itemIds) : current.value, saved)
+      savedSignature.value = paperEditableSignature(saved)
+      if (!isDirty.value) await clearRecovery()
+      // Export callers must receive the persisted snapshot, not later unsaved edits.
+      return clonePlain(saved)
     } catch (reason) {
       error.value = errorMessage(reason, '保存试卷失败')
       throw reason
@@ -273,10 +474,7 @@ export const usePaperStore = defineStore('paper', () => {
 
   async function loadPaper(id: string) {
     error.value = null
-    const paper = await backend.getPaper(id)
-    if (!paper) throw new Error('找不到这份试卷，可能已被删除。')
-    current.value = normalizePaper(paper)
-    return current.value
+    return replaceCurrent(() => readStored(id))
   }
 
   async function readStored(id: string) {
@@ -323,19 +521,24 @@ export const usePaperStore = defineStore('paper', () => {
 
   async function copyAndLoad(id: string, baseRowVersion: number) {
     error.value = null
-    current.value = normalizePaper(await backend.copyPaper(id, baseRowVersion))
-    return current.value
+    return replaceCurrent(() => backend.copyPaper(id, baseRowVersion))
   }
 
   async function deleteStored(id: string, baseRowVersion: number) {
+    if (current.value.id === id && (isDirty.value || saving.value || transitioning.value)) {
+      throw new Error('这份试卷仍在编辑，请先保存修改或切换到新试卷后再删除。')
+    }
     await backend.deletePaper(id, baseRowVersion)
     papers.value = papers.value.filter((paper) => paper.id !== id)
     historyTotal.value = Math.max(0, historyTotal.value - 1)
-    if (current.value.id === id) newPaper()
+    if (current.value.id === id) await newPaper()
   }
 
   async function deleteStoredBatch(items: readonly Pick<PaperSummary, 'id' | 'rowVersion'>[]) {
     if (!items.length) return
+    if (items.some((item) => item.id === current.value.id) && (isDirty.value || saving.value || transitioning.value)) {
+      throw new Error('选中的试卷仍在编辑，请先保存修改或切换到新试卷后再删除。')
+    }
     await backend.deletePapers(items.map((item) => ({
       id: item.id,
       baseRowVersion: item.rowVersion,
@@ -343,7 +546,7 @@ export const usePaperStore = defineStore('paper', () => {
     const deletedIds = new Set(items.map((item) => item.id))
     papers.value = papers.value.filter((paper) => !deletedIds.has(paper.id))
     historyTotal.value = Math.max(0, historyTotal.value - deletedIds.size)
-    if (deletedIds.has(current.value.id)) newPaper()
+    if (deletedIds.has(current.value.id)) await newPaper()
   }
 
   return {
@@ -353,6 +556,16 @@ export const usePaperStore = defineStore('paper', () => {
     saving,
     historyLoading,
     error,
+    isDirty,
+    transitioning,
+    pendingRecovery,
+    recoveryError,
+    recoverySavedAt,
+    initializeRecovery,
+    recoverPaper,
+    discardPendingRecovery,
+    checkpoint,
+    prepareToClose,
     selectedQuestionIds,
     addQuestions,
     removeItem,

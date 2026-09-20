@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '../components/PageHeader.vue'
 import QuestionPreviewDrawer from '../components/QuestionPreviewDrawer.vue'
+import DuplicateStemSummary from '../components/DuplicateStemSummary.vue'
+import QuestionStemSummary from '../components/QuestionStemSummary.vue'
+import { createQuestionStemLoader } from '../services/questionStemLoader'
 import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
 import { useAppStore } from '../stores/app'
@@ -25,6 +28,12 @@ const keepers = ref<Record<string, string>>({})
 const previewOpen = ref(false)
 const previewQuestion = ref<Question | null>(null)
 let scanSequence = 0
+let stemLoader = createQuestionStemLoader((ids) => backend.getQuestionStemSummaries(ids))
+onBeforeUnmount(() => { scanSequence += 1; stemLoader.dispose() })
+
+function loadStem(member: QuestionDuplicateGroup['members'][number]) {
+  return stemLoader.load(member.id, member.contentVersion)
+}
 
 function queryText(value: unknown) {
   return typeof value === 'string' ? value : ''
@@ -62,6 +71,8 @@ function resetKeepers(scanResult: QuestionDuplicateScanResult) {
 
 async function scan() {
   const requestSequence = ++scanSequence
+  stemLoader.dispose()
+  stemLoader = createQuestionStemLoader((ids) => backend.getQuestionStemSummaries(ids))
   result.value = null
   loadError.value = ''
   if (!scopeIsValid.value) {
@@ -114,9 +125,25 @@ async function recycleDuplicates(group: QuestionDuplicateGroup) {
   const recycleIds = group.members.filter((member) => member.id !== keeperId).map((member) => member.id)
   if (!keeperId || !recycleIds.length) return
   const keeper = group.members.find((member) => member.id === keeperId)
+  if (!keeper || operationGroupId.value) return
+  const sequence = scanSequence
+  operationGroupId.value = group.id
+  let stem
+  try {
+    stem = await loadStem(keeper)
+  } catch (reason) {
+    if (sequence === scanSequence) ElMessage.error(errorMessage(reason, '题干读取失败，请重新检查后再处理'))
+    operationGroupId.value = null
+    return
+  }
+  if (sequence !== scanSequence) { operationGroupId.value = null; return }
   try {
     await ElMessageBox.confirm(
-      `将其余 ${recycleIds.length} 道题移入回收站，保留“${keeper?.stemPreview || '所选题目'}”。可随后在回收站恢复。`,
+      h('div', [
+        h('p', '保留以下题目：'),
+        h(QuestionStemSummary, { content: stem, lines: 3 }),
+        h('p', `其余 ${recycleIds.length} 道题移入回收站，可随后恢复。`),
+      ]),
       '确认处理重复题',
       {
         type: 'warning',
@@ -125,8 +152,10 @@ async function recycleDuplicates(group: QuestionDuplicateGroup) {
       },
     )
   } catch {
+    operationGroupId.value = null
     return
   }
+  if (sequence !== scanSequence) { operationGroupId.value = null; return }
   operationGroupId.value = group.id
   try {
     await backend.moveQuestionsToRecycle(recycleIds)
@@ -245,7 +274,11 @@ watch(
                     <el-tag size="small" effect="plain">{{ questionTypeLabel(member.type, appStore.questionTypes) }}</el-tag>
                     <span>{{ member.subjectName }} / {{ member.chapterName }}</span>
                   </div>
-                  <p>{{ member.stemPreview || '（无题干文字，请打开预览查看图片或其他内容）' }}</p>
+                  <DuplicateStemSummary
+                    :key="`${scanSequence}:${member.id}:${member.contentVersion}`"
+                    class="duplicate-member__stem"
+                    :load="() => loadStem(member)"
+                  />
                   <small>创建：{{ formatTime(member.createdAt) }} · 最近修改：{{ formatTime(member.updatedAt) }}</small>
                 </div>
                 <el-button @click="openPreview(member.id)">查看内容</el-button>
@@ -418,15 +451,13 @@ watch(
   font-size: 11px;
 }
 
-.duplicate-member__content p {
+.duplicate-member__stem {
   margin: 8px 0;
   overflow: hidden;
   color: #1e293b;
   font-size: 13px;
   font-weight: 600;
   line-height: 1.55;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .duplicate-member__content > small {

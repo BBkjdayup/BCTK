@@ -20,6 +20,25 @@ describe('RichTextEditor', () => {
     },
   }
 
+  it('emits actual LaTeX for formula-only answers and preserves it when reopened', async () => {
+    const wrapper = mount(RichTextEditor, { props: { modelValue: content('', '') }, global })
+    await flushPromises()
+    const editor = (wrapper.vm as unknown as {
+      $: { setupState: { tiptap: import('@tiptap/core').Editor } }
+    }).$.setupState.tiptap
+    for (const latex of ['x^{2}', 'x^{3}']) {
+      editor.commands.setContent({ type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'mathNode', attrs: { latex } }] }] })
+      await flushPromises()
+      const updates = wrapper.emitted('update:modelValue')!
+      const value = updates[updates.length - 1]![0] as RichContent
+      expect(value.plainText).toBe(latex)
+      expect(value.html).toContain(`data-latex="${latex}"`)
+      await wrapper.setProps({ modelValue: value })
+      expect(editor.getJSON()).toMatchObject({ content: [{ content: [{ attrs: { latex } }] }] })
+    }
+    wrapper.unmount()
+  })
+
   it('renders safe plain text when recovered content has no HTML cache', async () => {
     const wrapper = mount(RichTextEditor, {
       props: { modelValue: content('', '<选项甲>& 选项乙') },

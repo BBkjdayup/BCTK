@@ -120,6 +120,8 @@ export interface Question {
 }
 
 export interface QuestionDraft {
+  /** Persisted in autosaved drafts until the teacher explicitly checks the answer. */
+  answerReviewRequired?: boolean
   id?: string
   questionId?: string
   type: QuestionType
@@ -319,6 +321,12 @@ export interface QuestionDuplicateMember {
   contentVersion: number
   createdAt: number
   updatedAt: number
+}
+
+export interface QuestionStemSummary {
+  id: string
+  contentVersion: number
+  stem: RichContent
 }
 
 export interface QuestionDuplicateGroup {
@@ -563,119 +571,6 @@ export interface PageResult<T> {
   pageSize: number
 }
 
-export interface EffectiveCapabilities {
-  canEditSingleQuestion: boolean
-  canBatchImport: boolean
-  maxQuestionsPerPaper: number | null
-  canExportDocuments: boolean
-  canPrint: boolean
-  canUseCloudSync: boolean
-  canUseWebApp: boolean
-}
-
-export interface DesktopLicenseStatus {
-  state: 'active' | 'grace' | 'basic' | 'invalid' | string
-  plan: string
-  licenseId: string | null
-  customerName: string | null
-  issuedAtMs: number | null
-  expiresAtMs: number | null
-  graceEndsAtMs: number | null
-  message: string
-}
-
-export interface CloudSubscriptionStatus {
-  state: 'notConfigured' | 'active' | 'expired' | string
-  syncEnabled: boolean
-  webAppEnabled: boolean
-  expiresAtMs: number | null
-  message: string
-}
-
-export interface LicenseOverview {
-  deviceId: string
-  desktop: DesktopLicenseStatus
-  cloud: CloudSubscriptionStatus
-  capabilities: EffectiveCapabilities
-}
-
-export interface CloudUser {
-  id: string
-  username: string
-  email: string | null
-  created_at: string
-}
-
-export interface CloudEntitlement {
-  plan_code: string
-  status: string
-  expires_at: string | null
-}
-
-export interface CloudAccountStatus {
-  configured: boolean
-  apiBaseUrl: string
-  loggedIn: boolean
-  user: CloudUser | null
-  entitlement: CloudEntitlement | null
-  canSync: boolean
-  databaseBound: boolean
-  lastSyncAtMs: number | null
-  conflictCount: number
-  message: string
-}
-
-export interface CloudLoginRequest {
-  account: string
-  password: string
-}
-
-export interface CloudRegisterRequest {
-  username: string
-  email: string | null
-  password: string
-}
-
-export interface CloudSyncResult {
-  pulledCount: number
-  uploadedCount: number
-  mergedCount: number
-  conflictCount: number
-  skippedCount: number
-  completedAtMs: number
-  message: string
-}
-
-export interface CloudSyncPreflight {
-  localEntityCount: number
-  localQuestionCount: number
-  cloudEntityCount: number
-  cloudQuestionCount: number
-  localHasData: boolean
-  cloudHasData: boolean
-  bothNonEmpty: boolean
-  recommendedMode: 'merge'
-}
-
-export interface CloudSyncConflict {
-  id: string
-  entityKind: string
-  entityId: string
-  detectedAtMs: number
-  message: string
-}
-
-export interface ResolveCloudSyncConflictRequest {
-  id: string
-  resolution: 'keep_local' | 'use_cloud'
-}
-
-export interface LicenseFileResult {
-  path: string
-  filename: string
-  bytes: number
-}
-
 export interface BootstrapData {
   initialized: boolean
   dataRoot: string
@@ -686,7 +581,6 @@ export interface BootstrapData {
   databaseHealthy: boolean
   databaseError?: string | null
   appVersion: string
-  license: LicenseOverview
 }
 
 export interface DocxDiagnostic {
@@ -1035,6 +929,9 @@ export interface PaperDocxExportRequest {
   expectedPaperRowVersion: number
   templateId: string
   outputPath: string
+  /** Export-only choices; never modify the archived paper. */
+  title?: string
+  contentMode?: ExportContentMode
 }
 
 export interface PaperDocxExportResult {
@@ -1129,6 +1026,12 @@ export interface Paper {
   updatedAt: number
   savedAt?: number | null
   lastSavedAt?: number | null
+}
+
+export interface PaperRecovery {
+  paper: Paper
+  revision: string
+  autosavedAt: number
 }
 
 export interface PaperSummary {

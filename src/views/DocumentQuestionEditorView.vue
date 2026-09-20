@@ -512,10 +512,6 @@ async function replaceExistingWordImportDraftIfNeeded() {
 }
 
 async function beginRecognition() {
-  if (!appStore.license.capabilities.canBatchImport) {
-    ElMessage.warning('基础桌面模式不支持批量识别与导入；单题录入仍可正常使用。')
-    return
-  }
   if (!source.value.plainText.trim()) {
     ElMessage.warning('当前纸张还是空白的，请先按照编辑区内的灰色模板提示手工输入题目内容。')
     sourceEditor.value?.focus()
@@ -633,13 +629,6 @@ onBeforeRouteLeave(async () => {
 
 <template>
   <section class="document-entry-page">
-    <el-alert
-      v-if="!appStore.license.capabilities.canBatchImport"
-      title="当前为基础桌面模式：可继续编辑和保存这份本地草稿，但批量识别与写入题库需要桌面专业版。"
-      type="info"
-      :closable="false"
-      show-icon
-    />
     <header class="entry-page-header">
       <div class="entry-header-left">
         <el-button :icon="Back" @click="router.push('/questions/new')">表单录入</el-button>
@@ -681,7 +670,6 @@ onBeforeRouteLeave(async () => {
           type="primary"
           :icon="DocumentAdd"
           :loading="recognizing"
-          :disabled="!appStore.license.capabilities.canBatchImport"
           @click="beginRecognition"
         >
           开始识别

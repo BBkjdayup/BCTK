@@ -23,6 +23,7 @@ import {
   type TemplateStylePrototype,
 } from '../types/domain'
 import { effectiveQuestionTypes, questionTypeLabel } from './questionTypes'
+import { hashString } from './paperSourceSignature'
 
 // This identifies the local adapter as well as the upstream editor. Changing
 // it lets old template previews be regenerated when our OOXML mapping improves.
@@ -70,29 +71,7 @@ export const DEFAULT_CANVAS_EDITOR_OPTIONS: IEditorOption = {
   printPixelRatio: 2,
 }
 
-function hashString(value: string) {
-  let hash = 0x811c9dc5
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index)
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return (hash >>> 0).toString(16).padStart(8, '0')
-}
-
-export function paperLayoutSourceSignature(paper: Paper) {
-  const source = [
-    paper.title,
-    paper.exportContentMode,
-    paper.preferredTemplateId ?? '',
-    ...paper.items.map((item) => [
-      item.id,
-      item.position,
-      item.snapshot.contentVersion,
-      item.snapshot.updatedAt,
-    ].join(':')),
-  ].join('|')
-  return `paper-v1:${paper.items.length}:${hashString(source)}`
-}
+export { paperLayoutSourceSignature } from './paperSourceSignature'
 
 const WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 

@@ -29,7 +29,6 @@ const expanded = ref(new Set(appStore.subjects.map((subject) => subject.id)))
 const contextMenuOpen = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
-const contextMenuTitle = ref('')
 const contextMenuItems = ref<ContextMenuItem[]>([])
 const contextSubject = ref<Subject>()
 const contextChapter = ref<Chapter>()
@@ -171,7 +170,6 @@ function openSubjectContextMenu(event: MouseEvent, subject: Subject) {
   event.preventDefault()
   contextSubject.value = subject
   contextChapter.value = undefined
-  contextMenuTitle.value = `${subject.name} · ${subject.questionCount} 道题`
   const hasNoChapter = subject.chapters.length === 0
   contextMenuItems.value = [
     {
@@ -192,16 +190,13 @@ function openSubjectContextMenu(event: MouseEvent, subject: Subject) {
       label: '检查本学科重复题',
       disabled: subject.questionCount === 0,
       hint: subject.questionCount === 0 ? '该学科还没有题目' : undefined,
-      dividerBefore: true,
     },
-    { id: 'toggle', label: expanded.value.has(subject.id) ? '收起该学科章节' : '展开该学科章节' },
-    { id: 'rename', label: '重命名学科', dividerBefore: true },
+    { id: 'rename', label: '重命名学科' },
     { id: 'manage-order', label: '管理学科与章节顺序' },
     {
       id: 'delete',
       label: '删除学科',
       danger: true,
-      dividerBefore: true,
       disabled: Boolean(subject.chapters.length || subject.questionCount),
       hint: subject.chapters.length || subject.questionCount ? '请先移走题目并删除章节' : undefined,
     },
@@ -215,7 +210,6 @@ function openChapterContextMenu(event: MouseEvent, subject: Subject, chapter: Ch
   event.preventDefault()
   contextSubject.value = subject
   contextChapter.value = chapter
-  contextMenuTitle.value = `${chapter.name} · ${chapter.questionCount} 道题`
   contextMenuItems.value = [
     { id: 'new-question', label: '在该章节新增题目' },
     { id: 'word-import', label: '批量导入到该章节' },
@@ -224,16 +218,14 @@ function openChapterContextMenu(event: MouseEvent, subject: Subject, chapter: Ch
       label: '检查本章节重复题',
       disabled: chapter.questionCount === 0,
       hint: chapter.questionCount === 0 ? '该章节还没有题目' : undefined,
-      dividerBefore: true,
     },
     { id: 'view', label: '查看本章节题目' },
-    { id: 'rename', label: '重命名章节', dividerBefore: true },
+    { id: 'rename', label: '重命名章节' },
     { id: 'manage-order', label: '管理章节顺序' },
     {
       id: 'delete',
       label: '删除章节',
       danger: true,
-      dividerBefore: true,
       disabled: chapter.questionCount > 0,
       hint: chapter.questionCount ? `请先移走其中 ${chapter.questionCount} 道题` : undefined,
     },
@@ -270,7 +262,6 @@ function handleContextMenu(item: ContextMenuItem) {
     })
   }
   if (item.id === 'new-chapter') void createChapter(subject)
-  if (item.id === 'toggle') toggle(subject.id)
   if (item.id === 'view' && chapter) emit('select', { subjectId: subject.id, chapterId: chapter.id })
   if (item.id === 'rename') {
     if (chapter) void renameChapter(subject, chapter)
@@ -387,7 +378,6 @@ function handleContextMenu(item: ContextMenuItem) {
       v-model="contextMenuOpen"
       :x="contextMenuX"
       :y="contextMenuY"
-      :title="contextMenuTitle"
       :items="contextMenuItems"
       @select="handleContextMenu"
     />

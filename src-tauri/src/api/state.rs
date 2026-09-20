@@ -3,7 +3,6 @@ use std::{ops::Deref, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::db::Database;
-use crate::licensing::LicenseService;
 
 use super::models::{CommandError, CommandResult};
 
@@ -16,7 +15,6 @@ pub struct AppState {
     retry_guard: Arc<Mutex<()>>,
     data_root: PathBuf,
     app_version: String,
-    license_service: LicenseService,
 }
 
 /// Shared access to the current database for the lifetime of a command.
@@ -77,28 +75,7 @@ impl RestoreMaintenanceLease {
 }
 
 impl AppState {
-    pub fn unavailable_with_license_roots(
-        data_root: PathBuf,
-        security_root: PathBuf,
-        license_root: PathBuf,
-        legacy_security_root: Option<PathBuf>,
-        app_version: String,
-        message: String,
-    ) -> Self {
-        let license_service = LicenseService::initialize_with_roots(
-            security_root.clone(),
-            license_root.clone(),
-            legacy_security_root,
-            app_version.clone(),
-        )
-        .unwrap_or_else(|error| {
-            LicenseService::fallback_with_roots(
-                security_root,
-                license_root,
-                app_version.clone(),
-                error.message,
-            )
-        });
+    pub fn unavailable(data_root: PathBuf, app_version: String, message: String) -> Self {
         Self {
             database: Arc::new(RwLock::new(None)),
             maintenance: Arc::new(RwLock::new(())),
@@ -107,44 +84,10 @@ impl AppState {
             retry_guard: Arc::new(Mutex::new(())),
             data_root,
             app_version,
-            license_service,
         }
     }
 
-    #[cfg(test)]
     pub async fn initialize(data_root: PathBuf, app_version: String) -> Self {
-        let license_root = data_root.join(".licensing-test");
-        Self::initialize_with_license_roots(
-            data_root,
-            license_root.clone(),
-            license_root,
-            None,
-            app_version,
-        )
-        .await
-    }
-
-    pub async fn initialize_with_license_roots(
-        data_root: PathBuf,
-        security_root: PathBuf,
-        license_root: PathBuf,
-        legacy_security_root: Option<PathBuf>,
-        app_version: String,
-    ) -> Self {
-        let license_service = LicenseService::initialize_with_roots(
-            security_root.clone(),
-            license_root.clone(),
-            legacy_security_root,
-            app_version.clone(),
-        )
-        .unwrap_or_else(|error| {
-            LicenseService::fallback_with_roots(
-                security_root,
-                license_root,
-                app_version.clone(),
-                error.message,
-            )
-        });
         let database = Database::open(data_root.clone(), &app_version).await;
         match database {
             Ok(database) => Self {
@@ -155,7 +98,6 @@ impl AppState {
                 retry_guard: Arc::new(Mutex::new(())),
                 data_root,
                 app_version,
-                license_service,
             },
             Err(error) => Self {
                 database: Arc::new(RwLock::new(None)),
@@ -165,7 +107,6 @@ impl AppState {
                 retry_guard: Arc::new(Mutex::new(())),
                 data_root,
                 app_version,
-                license_service,
             },
         }
     }
@@ -271,10 +212,6 @@ impl AppState {
     }
     pub fn app_version(&self) -> &str {
         &self.app_version
-    }
-
-    pub fn license(&self) -> &LicenseService {
-        &self.license_service
     }
 }
 

@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft, Delete, DocumentChecked, Plus, Search } from '@element-plus/icons-vue'
 import PageHeader from '../components/PageHeader.vue'
-import PaperExportDialog, { type PaperExportPreparation } from '../components/PaperExportDialog.vue'
+import PaperExportDialog from '../components/PaperExportDialog.vue'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { normalizePaperItems, usePaperStore } from '../stores/paper'
 import { useAppStore } from '../stores/app'
@@ -107,18 +107,19 @@ async function openPaper(paper: PaperSummary) {
   }
 }
 
-function startPaper() {
-  paperStore.newPaper()
-  void router.push('/papers')
+async function startPaper() {
+  try {
+    if (await paperStore.newPaper()) await router.push('/papers')
+  } catch (reason) { ElMessage.error(errorMessage(reason, '未能开始新试卷，已保留当前内容')) }
 }
 
 async function reEdit(paper: PaperSummary | Paper) {
   try {
     if (paper.status === 'draft') {
-      await paperStore.loadPaper(paper.id)
+      if (!(await paperStore.loadPaper(paper.id))) return
       ElMessage.success(`已继续编辑草稿“${paper.title}”`)
     } else {
-      await paperStore.copyAndLoad(paper.id, paper.rowVersion)
+      if (!(await paperStore.copyAndLoad(paper.id, paper.rowVersion))) return
       ElMessage.success(`已从“${paper.title}”创建可编辑副本`)
     }
     void router.push({ path: '/papers', query: { view: 'edit' } })
@@ -176,13 +177,12 @@ async function deleteSelectedPapers() {
   }
 }
 
-async function prepareSelectedPaperForExport(preparation: PaperExportPreparation): Promise<Paper> {
+async function prepareSelectedPaperForExport(): Promise<Paper> {
   if (!selectedPaper.value) throw new Error('请先重新打开要导出的试卷。')
   const paper = selectedPaper.value
+  if (paper.status === 'saved') return paper
   const saved = await backend.savePaper({
     ...paper,
-    title: preparation.title,
-    exportContentMode: preparation.contentMode,
     status: 'saved',
     items: normalizePaperItems(paper.items),
   })

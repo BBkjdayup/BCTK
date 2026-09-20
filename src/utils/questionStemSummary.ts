@@ -42,16 +42,16 @@ function assetMarker(document: Document, kind: 'image' | 'table', title?: string
 
 export function compactQuestionStemHtml(value: string) {
   if (!value.trim()) return ''
-  if (typeof DOMParser === 'undefined') return value
+  if (typeof DOMParser === 'undefined') return escapeHtml(value)
 
   const document = new DOMParser().parseFromString(
     `<div data-question-stem-summary-root>${value}</div>`,
     'text/html',
   )
   const root = document.querySelector<HTMLElement>('[data-question-stem-summary-root]')
-  if (!root) return value
+  if (!root) return escapeHtml(value)
 
-  root.querySelectorAll('script, style, iframe, object, embed').forEach((node) => node.remove())
+  root.querySelectorAll('script, style, iframe, object, embed, svg, math, link, meta, input, button, textarea, select').forEach((node) => node.remove())
   root.querySelectorAll('table').forEach((table) => {
     table.replaceWith(assetMarker(document, 'table'))
   })
@@ -64,6 +64,7 @@ export function compactQuestionStemHtml(value: string) {
   const blockSelector = 'p, div, h1, h2, h3, h4, h5, h6, li, ul, ol, blockquote, pre'
   const blockElements = [...root.querySelectorAll<HTMLElement>(blockSelector)].reverse()
   for (const element of blockElements) {
+    if (element.hasAttribute('data-latex')) continue
     const segment = document.createElement('span')
     segment.className = 'question-stem-summary__segment'
     while (element.firstChild) segment.append(element.firstChild)
@@ -71,5 +72,24 @@ export function compactQuestionStemHtml(value: string) {
     element.replaceWith(segment)
   }
 
+  // Summary markup is display-only, even when reading legacy imported content.
+  for (const element of [...root.querySelectorAll<HTMLElement>('*')].reverse()) {
+    const latex = element.getAttribute('data-latex')
+    if (latex !== null) {
+      const formula = document.createElement('span')
+      formula.className = 'math-node'
+      formula.dataset.latex = latex
+      formula.textContent = latex
+      element.replaceWith(formula)
+      continue
+    }
+    if (!['SPAN', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'SUB', 'SUP'].includes(element.tagName)) {
+      element.replaceWith(...element.childNodes)
+      continue
+    }
+    const classes = [...element.classList].filter((name) => name.startsWith('question-stem-summary__'))
+    for (const attribute of [...element.attributes]) element.removeAttribute(attribute.name)
+    if (classes.length) element.className = classes.join(' ')
+  }
   return root.innerHTML.trim()
 }

@@ -110,15 +110,14 @@ function addToPaper(question: Question) {
 }
 
 function addQuestionsToPaper(questions: Question[]) {
-  const limit = appStore.license.capabilities.maxQuestionsPerPaper
-  const added = paperStore.addQuestions(questions, limit)
+  const added = paperStore.addQuestions(questions)
   if (!added) {
-    ElMessage.warning(limit == null ? '所选题目已经在当前试卷中。' : `基础桌面模式每份试卷最多加入 ${limit} 道题。`)
+    ElMessage.warning('所选题目已经在当前试卷中。')
     return
   }
   const omitted = questions.length - added
   ElMessage.success(omitted > 0
-    ? `已加入 ${added} 道，达到 ${limit} 道上限。`
+    ? `已加入 ${added} 道，跳过 ${omitted} 道已选题目。`
     : `已加入当前试卷，共 ${paperStore.current.items.length} 题`)
 }
 
@@ -165,7 +164,7 @@ async function removeQuestions(questions: Question[]) {
   if (!ids.length) return
   try {
     await ElMessageBox.confirm(
-      `将 ${ids.length} 道题移入回收站？软件会在 ${recycleRetentionDays.value} 天后提醒清理，在永久删除前仍可恢复。`,
+      `将 ${ids.length} 道题移入回收站？建议保留 ${recycleRetentionDays.value} 天，在手动永久删除前均可恢复。`,
       '移入回收站',
       { type: 'warning', confirmButtonText: '移入回收站', cancelButtonText: '取消' },
     )

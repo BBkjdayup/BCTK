@@ -2,10 +2,8 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
-import { basicLicenseOverview } from '../utils/licensing'
 import type {
   BootstrapData,
-  LicenseOverview,
   QuestionTypeDefinition,
   SaveQuestionTypeRequest,
   Subject,
@@ -24,7 +22,6 @@ export const useAppStore = defineStore('app', () => {
   const tags = ref<Tag[]>([])
   const questionTypes = ref<QuestionTypeDefinition[]>([])
   const error = ref<string | null>(null)
-  const license = ref<LicenseOverview>(basicLicenseOverview())
   let bootstrapRequestSequence = 0
 
   const questionCount = computed(() => subjects.value.reduce((sum, subject) => sum + subject.questionCount, 0))
@@ -39,15 +36,6 @@ export const useAppStore = defineStore('app', () => {
     subjects.value = bootstrap.subjects
     tags.value = bootstrap.tags
     questionTypes.value = bootstrap.questionTypes
-    license.value = bootstrap.license
-  }
-
-  async function refreshLicense() {
-    license.value = await backend.getLicenseOverview()
-  }
-
-  function applyLicense(overview: LicenseOverview) {
-    license.value = overview
   }
 
   async function refreshAfterMutation() {
@@ -191,11 +179,8 @@ export const useAppStore = defineStore('app', () => {
     tags,
     questionTypes,
     error,
-    license,
     questionCount,
     initialize,
-    refreshLicense,
-    applyLicense,
     refreshTaxonomy,
     retryDatabase,
     createInitialSubject,

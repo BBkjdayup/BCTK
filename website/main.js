@@ -42,12 +42,15 @@ async function refreshDownload() {
 if (typeof document !== 'undefined') {
   const year = document.getElementById('copyright-year')
   if (year) year.textContent = String(new Date().getFullYear())
-  document.querySelectorAll('a[href="#trial-faq"]').forEach((link) => {
+  document.querySelectorAll('a[href="#free-faq"]').forEach((link) => {
     link.addEventListener('click', () => {
-      const details = document.getElementById('trial-faq')
+      const details = document.getElementById('free-faq')
       if (details) details.open = true
     })
   })
-  if (window.location.hash === '#trial-faq') document.getElementById('trial-faq').open = true
+  if (['#free-faq', '#trial-faq'].includes(window.location.hash)) {
+    const details = document.getElementById('free-faq')
+    if (details) details.open = true
+  }
   void refreshDownload()
 }

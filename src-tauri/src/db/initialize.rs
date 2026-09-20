@@ -316,6 +316,9 @@ impl Database {
         Self::force_delete_journal(&mut connection).await?;
         Self::prepare_legacy_builtin_question_type_conflicts(&mut connection).await?;
         MIGRATOR.run_direct(&mut connection).await?;
+        crate::api::content_identity::rebuild_pending(&mut connection, None)
+            .await
+            .map_err(|error| DatabaseError::IntegrityCheck(error.message))?;
         Self::ensure_database_identity_connection(&mut connection, app_version).await?;
         Self::verify_integrity_connection(&mut connection).await?;
 
@@ -857,6 +860,62 @@ mod tests {
             "zhitiku-db-{name}-{}",
             uuid::Uuid::now_v7().simple()
         ))
+    }
+
+    #[tokio::test]
+    async fn acceptance_v21_upgrade_rebuilds_math_identity_and_retains_original_database() {
+        let root = test_root("v21-rich-identity");
+        let paths = DatabasePaths::new(&root);
+        paths.prepare().unwrap();
+        let mut connection = connect_connection(paths.database_file(), true)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA application_id = 1515473749")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.ensure_migrations_table().await.unwrap();
+        for migration in MIGRATOR.iter().filter(|m| m.version <= 21) {
+            connection.apply(migration).await.unwrap();
+        }
+        sqlx::query("INSERT INTO app_meta (singleton_id, database_uuid, created_by_app_version, created_at_ms) VALUES (1, ?, '0.1.83', 1)")
+            .bind(uuid::Uuid::now_v7().to_string()).execute(&mut connection).await.unwrap();
+        let subject = uuid::Uuid::now_v7().to_string();
+        let chapter = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO subjects (id, name, name_key, sort_order, created_at_ms, updated_at_ms) VALUES (?, '验收', '验收', 0, 1, 1)")
+            .bind(&subject).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO chapters (id, subject_id, name, name_key, sort_order, created_at_ms, updated_at_ms) VALUES (?, ?, '公式', '公式', 0, 1, 1)")
+            .bind(&chapter).bind(&subject).execute(&mut connection).await.unwrap();
+        let blank = serde_json::json!({"schemaVersion":1,"html":"","plainText":""}).to_string();
+        for latex in ["x^2", "x^3"] {
+            let rich = serde_json::json!({"schemaVersion":1,"html":format!("<p><span data-latex='{latex}'></span></p>"),"plainText":""}).to_string();
+            sqlx::query("INSERT INTO questions (id, question_type, subject_id, chapter_id, stem_json, answer_json, explanation_json, stem_plain, answer_plain, exact_fingerprint, content_version, created_at_ms, updated_at_ms) VALUES (?, 'short_answer', ?, ?, ?, ?, ?, '', '', zeroblob(32), 4, 1, 7)")
+                .bind(uuid::Uuid::now_v7().to_string()).bind(&subject).bind(&chapter).bind(&rich).bind(&rich).bind(&blank)
+                .execute(&mut connection).await.unwrap();
+        }
+        connection.close().await.unwrap();
+        let database = Database::open(&root, "0.1.84-test").await.unwrap();
+        let rebuilt: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT exact_fingerprint) FROM questions WHERE fingerprint_version = 2 AND fingerprint_comparable = 1 AND content_version = 4 AND updated_at_ms = 7 AND stem_plain IN ('x^2', 'x^3')")
+            .fetch_one(database.pool()).await.unwrap();
+        assert_eq!(rebuilt, 2);
+        assert!(
+            fs::read_dir(paths.backup_dir())
+                .unwrap()
+                .filter_map(Result::ok)
+                .any(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("zhitiku-pre-migration-"))
+        );
+        database.close().await;
+        drop(database);
+        for attempt in 0..10 {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => break,
+                Err(_) if attempt < 9 => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => panic!("v21 acceptance test cleanup failed: {error}"),
+            }
+        }
     }
 
     #[test]

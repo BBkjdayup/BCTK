@@ -1,6 +1,7 @@
 import { h } from 'vue'
 import { ElLoading, ElMessage, ElMessageBox } from 'element-plus'
 import { checkForAppUpdate, installPendingAppUpdate, type AppUpdateInfo } from '../services/appUpdater'
+import { canCloseApplication } from '../services/closeProtection'
 import {
   UPDATE_PROMPT_STORAGE_KEY,
   appUpdatePromptRecord,
@@ -74,6 +75,7 @@ async function runUpdateFlow(automatic: boolean): Promise<AppUpdateFlowResult> {
     background: 'rgba(15, 23, 42, 0.35)',
   })
   try {
+    if (!(await canCloseApplication())) return { outcome: 'deferred', update }
     await installPendingAppUpdate((progress) => {
       if (progress.phase === 'installing') {
         loading.setText('下载完成，正在校验签名并启动安装…')

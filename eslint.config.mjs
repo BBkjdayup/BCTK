@@ -8,6 +8,7 @@ export default tseslint.config(
     ignores: [
       'dist/**',
       'website/dist/**',
+      'website/dist-admin/**',
       '.codex-tmp/**',
       'node_modules/**',
       'src-tauri/target/**',
@@ -37,7 +38,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['website/main.js'],
+    files: ['website/main.js', 'website/admin/**/*.{js,vue}'],
     languageOptions: {
       globals: globals.browser,
     },

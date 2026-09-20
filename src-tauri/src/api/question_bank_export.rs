@@ -718,6 +718,7 @@ mod tests {
         questions::save_question(
             database.pool(),
             &QuestionDraftApi {
+                answer_review_required: false,
                 id: None,
                 question_id: None,
                 question_type: "single_choice".to_owned(),

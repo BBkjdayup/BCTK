@@ -26,6 +26,19 @@ with tarfile.open(archive, 'r:gz') as source:
 PY
 test -s "$release/dist/index.html"
 test -s "$release/deploy/nginx.conf"
+# The installer and signed update manifest must be published before the site.
+curl --noproxy '*' -fsS https://api.tktiku.cn/updates/latest.json -o "$release/preflight-latest.json"
+python3 - "$release/dist/index.html" "$release/preflight-latest.json" <<'PY'
+import json, pathlib, re, sys
+html = pathlib.Path(sys.argv[1]).read_text(encoding='utf-8')
+manifest = json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))
+match = re.search(r'data-fallback-version="([0-9]+\.[0-9]+\.[0-9]+)"', html)
+if not match or match[1] != manifest.get('version'):
+    raise SystemExit('Website fallback and published desktop update versions differ; publish the verified installer first')
+expected = f"https://api.tktiku.cn/updates/files/tktiku-desktop_{match[1]}_windows_x86_64-setup.exe"
+if manifest.get('platforms', {}).get('windows-x86_64', {}).get('url') != expected:
+    raise SystemExit('Unexpected installer URL')
+PY
 find "$release" -type d -exec chmod 755 {} +
 find "$release" -type f -exec chmod 644 {} +
 previous=$(readlink "$base/current" || true)

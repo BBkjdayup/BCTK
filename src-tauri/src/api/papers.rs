@@ -6,7 +6,8 @@ use uuid::Uuid;
 
 use super::models::{
     AutomaticGenerationConfigDto, CommandError, CommandResult, PageResultApi, PaperApi,
-    PaperDeleteRequestApi, PaperFiltersApi, PaperItemApi, PaperSummaryApi, QuestionApi,
+    PaperDeleteRequestApi, PaperFiltersApi, PaperItemApi, PaperRecoveryApi, PaperSummaryApi,
+    QuestionApi,
 };
 use super::resources;
 
@@ -300,9 +301,10 @@ pub async fn save_paper(
             if paper.row_version != existing.row_version {
                 return Err(version_conflict());
             }
-            if existing.paper_status == "saved" && paper.status == "draft" {
-                return Err(CommandError::validation(
-                    "已保存的历史试卷不能改回草稿；请使用“再次编辑”创建副本。",
+            if existing.paper_status == "saved" {
+                return Err(CommandError::new(
+                    "PAPER_ARCHIVE_IMMUTABLE",
+                    "历史试卷不能覆盖，请另存为新试卷。",
                 ));
             }
             next_version = existing.row_version.saturating_add(1);
@@ -689,6 +691,85 @@ async fn insert_paper_item_resource_refs(
     Ok(())
 }
 
+pub async fn get_paper_recovery(pool: &SqlitePool) -> CommandResult<Option<PaperRecoveryApi>> {
+    let row = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT payload_json, revision, autosaved_at_ms FROM paper_recovery WHERE slot = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(CommandError::database)?;
+    row.map(|(payload, revision, autosaved_at)| {
+        Ok(PaperRecoveryApi {
+            paper: serde_json::from_str(&payload).map_err(CommandError::database)?,
+            revision,
+            autosaved_at,
+        })
+    })
+    .transpose()
+}
+
+pub async fn save_paper_recovery(
+    pool: &SqlitePool,
+    paper: &PaperApi,
+) -> CommandResult<PaperRecoveryApi> {
+    validate_uuid(&paper.id, "试卷 ID")?;
+    // Unfinished titles and empty selections must also be recoverable.
+    let mut validation_copy = paper.clone();
+    if validation_copy.title.trim().is_empty() {
+        validation_copy.title = "未命名试卷".into();
+    }
+    validation_copy.status = "draft".into();
+    validate_paper(&validation_copy)?;
+    let mut payload = paper.clone();
+    let mut transaction = pool.begin().await.map_err(CommandError::database)?;
+    let mut resource_ids = HashSet::new();
+    for item in &mut payload.items {
+        let snapshot = &mut item.snapshot;
+        snapshot.resource_refs = resources::reconcile_question_resource_refs(
+            &snapshot.stem,
+            &snapshot.options,
+            &snapshot.answer,
+            &snapshot.explanation,
+            &snapshot.resource_refs,
+        )?;
+        validate_snapshot_resource_refs(&mut transaction, snapshot).await?;
+        resource_ids.extend(snapshot.resource_refs.iter().map(|r| r.resource_id.clone()));
+    }
+    let revision = Uuid::now_v7().to_string();
+    let now = now_millis();
+    let json = serde_json::to_string(&payload).map_err(CommandError::database)?;
+    sqlx::query("INSERT INTO paper_recovery (slot, revision, payload_json, autosaved_at_ms) VALUES (1, ?, ?, ?) \
+        ON CONFLICT(slot) DO UPDATE SET revision = excluded.revision, payload_json = excluded.payload_json, autosaved_at_ms = excluded.autosaved_at_ms")
+        .bind(&revision).bind(json).bind(now).execute(&mut *transaction).await.map_err(CommandError::database)?;
+    sqlx::query("DELETE FROM paper_recovery_resource_refs")
+        .execute(&mut *transaction)
+        .await
+        .map_err(CommandError::database)?;
+    for resource_id in resource_ids {
+        sqlx::query("INSERT INTO paper_recovery_resource_refs (resource_id, slot) VALUES (?, 1)")
+            .bind(resource_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(CommandError::database)?;
+    }
+    transaction.commit().await.map_err(CommandError::database)?;
+    Ok(PaperRecoveryApi {
+        paper: payload,
+        revision,
+        autosaved_at: now,
+    })
+}
+
+pub async fn clear_paper_recovery(pool: &SqlitePool, revision: &str) -> CommandResult<()> {
+    // A late completion must never clear a newer checkpoint.
+    sqlx::query("DELETE FROM paper_recovery WHERE slot = 1 AND revision = ?")
+        .bind(revision)
+        .execute(pool)
+        .await
+        .map_err(CommandError::database)?;
+    Ok(())
+}
+
 fn validate_paper(paper: &PaperApi) -> CommandResult<String> {
     let title = paper.title.trim().nfkc().collect::<String>();
     let title = title.trim().to_owned();
@@ -1031,6 +1112,73 @@ mod tests {
             updated_at: 0,
             saved_at: None,
             last_saved_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn acceptance_recovery_survives_reopen_without_overwriting_history() {
+        let root = std::env::temp_dir().join(format!(
+            "zhitiku-paper-recovery-{}",
+            uuid::Uuid::now_v7().simple()
+        ));
+        let database = Database::open(&root, "test").await.unwrap();
+        let original = save_paper(database.pool(), &empty_paper("历史草稿"), "test")
+            .await
+            .unwrap();
+        let mut edited = original.clone();
+        edited.title = "".into();
+        let checkpoint = super::save_paper_recovery(database.pool(), &edited)
+            .await
+            .unwrap();
+        assert_eq!(
+            get_paper(database.pool(), &original.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .title,
+            "历史草稿"
+        );
+        database.close().await;
+        drop(database);
+        let database = Database::open(&root, "test").await.unwrap();
+        let recovered = super::get_paper_recovery(database.pool())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.paper.title, "");
+        assert_eq!(recovered.revision, checkpoint.revision);
+        edited.title = "继续编辑".into();
+        let latest = super::save_paper_recovery(database.pool(), &edited)
+            .await
+            .unwrap();
+        super::clear_paper_recovery(database.pool(), &checkpoint.revision)
+            .await
+            .unwrap();
+        assert_eq!(
+            super::get_paper_recovery(database.pool())
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            latest.revision
+        );
+        super::clear_paper_recovery(database.pool(), &latest.revision)
+            .await
+            .unwrap();
+        assert!(
+            super::get_paper_recovery(database.pool())
+                .await
+                .unwrap()
+                .is_none()
+        );
+        database.close().await;
+        drop(database);
+        for attempt in 0..10 {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => break,
+                Err(_) if attempt < 9 => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => panic!("recovery test cleanup failed: {error}"),
+            }
         }
     }
 

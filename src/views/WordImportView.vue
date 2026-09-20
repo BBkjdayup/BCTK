@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { type UnlistenFn } from '@tauri-apps/api/event'
-import { getCurrentWindow } from '@tauri-apps/api/window'
+import { registerCloseGuard } from '../services/closeProtection'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { UploadFilled, Document, CircleCheck, Warning, Delete } from '@element-plus/icons-vue'
 import AppContextMenu from '../components/AppContextMenu.vue'
@@ -257,8 +257,6 @@ function applyRememberedDuplicateAction(item: ImportItem) {
   if (!action || (action === 'overwrite' && item.duplicateCandidate.sourceKind === 'import-item')) return
   item.duplicateAction = action
 }
-
-const isTauriRuntime = () => desktopAvailable
 
 function explainDesktopRequirement() {
   ElMessage.info('浏览器只能演示页面，不能读取或导入电脑中的 Word、Excel 文件。请在 Windows 桌面版中执行。')
@@ -557,10 +555,6 @@ async function startRecognition() {
 }
 
 async function startDesktopRecognition(path: string) {
-  if (!appStore.license.capabilities.canBatchImport) {
-    ElMessage.warning('基础桌面模式不支持 Word 批量导入；请使用单题录入或导入桌面专业版授权。')
-    return
-  }
   recognitionRequest += 1
   const request = recognitionRequest
   clearInterval(timer)
@@ -860,10 +854,6 @@ function continuePostRecognitionSetup() {
 }
 
 async function startExcelRecognition(path: string) {
-  if (!appStore.license.capabilities.canBatchImport) {
-    ElMessage.warning('基础桌面模式不支持 Excel 批量导入；请使用单题录入或导入桌面专业版授权。')
-    return
-  }
   if (!selectedExcelSheet.value) {
     ElMessage.warning('请选择需要读取的 Excel 工作表。')
     return
@@ -1500,48 +1490,23 @@ function warnBeforeBrowserClose(event: BeforeUnloadEvent) {
 }
 
 async function registerCloseProtection() {
-  if (!isTauriRuntime()) {
-    window.addEventListener('beforeunload', warnBeforeBrowserClose)
-    return
-  }
-
-  try {
-    const unlisten = await getCurrentWindow().onCloseRequested(async (event) => {
-      if (!draftDirty.value && !saving.value && !draftAutosaving.value) return
-      event.preventDefault()
-      if (saving.value) {
-        ElMessage.warning('正在写入题库，请等待本次导入结束后再关闭软件。')
-        return
-      }
-      if (draftAutosaving.value) {
-        ElMessage.info('本地草稿正在保存，请等待完成后再关闭软件。')
-        return
-      }
-      if (closePromptOpen) return
-      closePromptOpen = true
-      try {
-        await ElMessageBox.confirm(
-          '当前批量导入审查还有未保存的修改。关闭软件前先保存本地草稿吗？',
-          '关闭软件',
-          {
-            type: 'warning',
-            confirmButtonText: '保存草稿并关闭',
-            cancelButtonText: '继续审查',
-            closeOnClickModal: false,
-          },
-        )
-        if (await autosaveWordImportDraft()) await getCurrentWindow().destroy()
-      } catch {
-        // The teacher chose to keep reviewing, so the close request stays cancelled.
-      } finally {
-        closePromptOpen = false
-      }
-    })
-    if (componentActive) unlistenCloseRequested = unlisten
-    else unlisten()
-  } catch {
-    if (componentActive) window.addEventListener('beforeunload', warnBeforeBrowserClose)
-  }
+  window.addEventListener('beforeunload', warnBeforeBrowserClose)
+  unlistenCloseRequested = registerCloseGuard(async () => {
+    if (!draftDirty.value && !saving.value && !draftAutosaving.value) return true
+    if (saving.value || draftAutosaving.value) {
+      ElMessage.warning('正在保存导入内容，请等待完成后再关闭软件。')
+      return false
+    }
+    if (closePromptOpen) return false
+    closePromptOpen = true
+    try {
+      await ElMessageBox.confirm('当前批量导入审查还有未保存的修改。关闭软件前先保存本地草稿吗？', '关闭软件', {
+        type: 'warning', confirmButtonText: '保存草稿并关闭', cancelButtonText: '继续审查', closeOnClickModal: false,
+      })
+      return await autosaveWordImportDraft()
+    } catch { return false }
+    finally { closePromptOpen = false }
+  })
 }
 
 watch([items, activeItemId], () => {
@@ -1644,14 +1609,15 @@ function normalizeBatchCheck(
   const result = batchResult.items.find((candidate) => candidate.clientId === entry.id)
   if (!result) throw new Error('批量重复检查返回结果不完整。')
   let check = clonePlain(result.check)
-  const previous = seenFingerprints.get(result.exactFingerprint)
-    ?? (check.candidate?.sourceKind === 'import-item'
+  const exactPrevious = result.exactFingerprint ? seenFingerprints.get(result.exactFingerprint) : undefined
+  const previous = exactPrevious
+    ?? (check.status === 'exact' && check.candidate?.sourceKind === 'import-item'
       ? items.value.find((candidate) => candidate.id === check.candidate?.id)
       : undefined)
-  if (previous && check.status !== 'exact') {
+  if (exactPrevious && check.status !== 'exact') {
     check = {
       status: 'exact',
-      candidate: importItemCandidate(previous),
+      candidate: importItemCandidate(exactPrevious),
       evaluatedCandidateCount: 1,
       suspectedThresholdPercent: check.suspectedThresholdPercent,
       similarityMethod: check.similarityMethod,
@@ -1659,7 +1625,7 @@ function normalizeBatchCheck(
   } else if (previous && check.candidate?.sourceKind === 'import-item') {
     check.candidate = importItemCandidate(previous)
   }
-  if (!seenFingerprints.has(result.exactFingerprint)) {
+  if (result.exactFingerprint && !seenFingerprints.has(result.exactFingerprint)) {
     seenFingerprints.set(result.exactFingerprint, entry)
   }
   return check
@@ -2599,14 +2565,6 @@ async function reset() {
 <template>
   <section class="page-main word-page">
       <el-alert
-        v-if="desktopAvailable && !appStore.license.capabilities.canBatchImport"
-        class="browser-runtime-note"
-        type="info"
-        :closable="false"
-        show-icon
-        title="当前为基础桌面模式：Word、Excel 与文档式批量导入已关闭，单题录入仍可正常使用。"
-      />
-      <el-alert
         v-if="!desktopAvailable && !isDocumentEntryReview"
         class="browser-runtime-note"
         type="warning"
@@ -2638,11 +2596,6 @@ async function reset() {
             <h2>桌面版才能选择批量导入文件</h2>
             <p>此处保留导入页面供浏览；拖放和文件选择均已关闭，不会模拟识别成功。</p>
             <button type="button" class="file-button" disabled>仅 Windows 桌面版可用</button>
-          </template>
-          <template v-else-if="!appStore.license.capabilities.canBatchImport">
-            <h2>桌面专业版可使用 Word 与 Excel 批量导入</h2>
-            <p>当前基础桌面模式仍可使用单题录入；已有导入草稿不会被删除。</p>
-            <button type="button" class="file-button" disabled>批量导入未授权</button>
           </template>
           <template v-else-if="recoveryChecking">
             <h2>正在检查未完成草稿…</h2>
@@ -2920,9 +2873,9 @@ async function reset() {
           <el-button
             type="primary"
             :loading="saving"
-            :disabled="saving || selectedCount === 0 || duplicateScanRunning || draftAutosaving || !reviewPersistenceAvailable || !appStore.license.capabilities.canBatchImport"
+            :disabled="saving || selectedCount === 0 || duplicateScanRunning || draftAutosaving || !reviewPersistenceAvailable"
             @click="confirmImport"
-          >{{ appStore.license.capabilities.canBatchImport ? `导入本批 ${selectedCount} 题` : '专业版可批量导入' }}</el-button>
+          >{{ `导入本批 ${selectedCount} 题` }}</el-button>
         </div>
       </footer>
   </section>

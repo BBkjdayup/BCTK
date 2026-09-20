@@ -5,7 +5,6 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { MagicStick, View, Delete, Top, Bottom, DocumentChecked, Back, Rank } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import SubjectTree from '../components/SubjectTree.vue'
-import type { PaperExportPreparation } from '../components/PaperExportDialog.vue'
 import AppContextMenu from '../components/AppContextMenu.vue'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { useAppStore } from '../stores/app'
@@ -89,13 +88,6 @@ const batchDrawDialogMounted = ref(false)
 bankStore.initializeFilters({ deleted: false, pageSize: 50 })
 paperStore.normalizeCurrentItems()
 
-const paperQuestionLimit = computed(() => appStore.license.capabilities.maxQuestionsPerPaper)
-const paperLimitReached = computed(() => (
-  paperQuestionLimit.value != null && paperStore.current.items.length >= paperQuestionLimit.value
-))
-const paperOverLimit = computed(() => (
-  paperQuestionLimit.value != null && paperStore.current.items.length > paperQuestionLimit.value
-))
 const typeCounts = computed(() => paperStore.current.items.reduce<Record<string, number>>((counts, item) => {
   counts[item.snapshot.type] = (counts[item.snapshot.type] ?? 0) + 1
   return counts
@@ -103,9 +95,6 @@ const typeCounts = computed(() => paperStore.current.items.reduce<Record<string,
 const groupedItems = computed(() => questionTypeCodes.value
   .map((type) => ({ type, items: paperStore.current.items.filter((item) => item.snapshot.type === type) }))
   .filter((group) => group.items.length))
-const randomDrawRemainingCapacity = computed(() => paperQuestionLimit.value == null
-  ? null
-  : Math.max(0, paperQuestionLimit.value - paperStore.current.items.length))
 const replacementPageItems = computed(() => {
   const start = (replacementPage.value - 1) * replacementPageSize
   return replacementCandidates.value.slice(start, start + replacementPageSize)
@@ -267,7 +256,7 @@ function openBatchDrawDialog() {
 function addRandomQuestions(selected: Question[]) {
   paperStore.current.compositionMode = 'manual'
   paperStore.current.generationConfig = null
-  const added = paperStore.addQuestions(selected, paperQuestionLimit.value)
+  const added = paperStore.addQuestions(selected)
   if (!added) {
     ElMessage.warning('本次抽到的题目均已在右侧，未重复加入。')
   }
@@ -385,13 +374,9 @@ async function changePreviewTemplate(templateId: string) {
 }
 
 function addQuestion(question: Question) {
-  if (paperLimitReached.value) {
-    ElMessage.warning(`基础桌面模式每份试卷最多加入 ${paperQuestionLimit.value} 道题。`)
-    return
-  }
   paperStore.current.compositionMode = 'manual'
   paperStore.current.generationConfig = null
-  const added = paperStore.addQuestions([question], paperQuestionLimit.value)
+  const added = paperStore.addQuestions([question])
   if (added) ElMessage.success('已加入当前试卷')
 }
 
@@ -511,13 +496,12 @@ async function savePaper(status: 'draft' | 'saved') {
     ElMessage.warning('当前试卷还没有题目')
     return
   }
-  if (paperOverLimit.value) {
-    ElMessage.warning(`这份旧试卷有 ${paperStore.current.items.length} 道题；基础桌面模式需先删减到 ${paperQuestionLimit.value} 道以内才能保存。`)
-    return
-  }
   try {
+    const alreadySaved = paperStore.current.rowVersion > 0 && paperStore.current.status === status && !paperStore.isDirty
+    const createsArchive = paperStore.current.status === 'saved'
     await paperStore.save(status)
-    ElMessage.success(status === 'saved' ? '试卷与题目快照已保存到历史记录' : '试卷草稿已保存')
+    if (alreadySaved) ElMessage.info('试卷已保存，没有新的修改')
+    else ElMessage.success(status === 'saved' ? (createsArchive ? '已另存为新试卷，原历史试卷保留' : '试卷与题目快照已保存到历史记录') : '试卷草稿已保存')
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '保存试卷失败'))
   }
@@ -535,15 +519,16 @@ function onCanvasFormulaChanged(change: PaperCanvasFormulaChange) {
   }
 }
 
-async function preparePaperForExport(preparation: PaperExportPreparation): Promise<Paper> {
-  paperStore.current.title = preparation.title
-  paperStore.current.exportContentMode = preparation.contentMode
-  if (preparation.templateId !== (paperStore.current.preferredTemplateId ?? '')) {
-    await applyPreviewTemplate(preparation.templateId, true)
-  } else {
-    paperStore.current.preferredTemplateId = preparation.templateId
-  }
+async function preparePaperForExport(): Promise<Paper> {
   return paperStore.save('saved')
+}
+
+async function startNewPaper() {
+  try {
+    if (await paperStore.newPaper()) mode.value = 'manual'
+  } catch (reason) {
+    ElMessage.error(errorMessage(reason, '未能新建试卷，当前编辑内容已保留'))
+  }
 }
 </script>
 
@@ -578,9 +563,9 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
               </div>
               <el-button
                 size="small"
-                :disabled="paperStore.selectedQuestionIds.has(question.id) || paperLimitReached"
+                :disabled="paperStore.selectedQuestionIds.has(question.id)"
                 @click="addQuestion(question)"
-              >{{ paperStore.selectedQuestionIds.has(question.id) ? '已加入' : paperLimitReached ? '已达上限' : '加入' }}</el-button>
+              >{{ paperStore.selectedQuestionIds.has(question.id) ? '已加入' : '加入' }}</el-button>
             </div>
             <div v-if="!bankStore.loading && !bankStore.questions.length" class="candidate-empty">
               当前页没有符合条件的题目，可以调整筛选条件。
@@ -605,16 +590,10 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
             <strong>已选题目 <span>{{ paperStore.current.items.length }}</span></strong>
             <div class="selected-panel__actions">
               <el-button plain type="primary" size="small" :icon="MagicStick" @click="openBatchDrawDialog">随机抽题</el-button>
-              <el-button text type="danger" size="small" @click="clearPaper">清空</el-button>
+              <el-button text type="primary" size="small" :disabled="paperStore.saving || paperStore.transitioning" @click="startNewPaper">新建试卷</el-button>
+              <el-button text type="danger" size="small" @click="clearPaper">清空题目</el-button>
             </div>
           </div>
-          <el-alert
-            v-if="paperQuestionLimit != null"
-            :title="`基础桌面模式：每份试卷最多 ${paperQuestionLimit} 道题，当前 ${paperStore.current.items.length} 道。`"
-            :type="paperOverLimit ? 'warning' : 'info'"
-            :closable="false"
-            show-icon
-          />
           <el-input v-model="paperStore.current.title" placeholder="试卷标题（可稍后修改）" />
           <div ref="selectedListRoot" class="selected-list">
             <div
@@ -644,17 +623,10 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
         <el-icon><Rank /></el-icon>
         <span>长按题目的编号或内容区域约 0.4 秒并拖动，可调整同一题型内的试题顺序</span>
       </div>
-      <el-alert
-        v-if="paperOverLimit"
-        :title="`当前有 ${paperStore.current.items.length} 道题，请删减到 ${paperQuestionLimit} 道以内后再保存。`"
-        type="warning"
-        :closable="false"
-        show-icon
-      />
       <div class="paper-edit-toolbar__actions">
         <el-button :icon="Back" @click="mode = 'manual'">返回选题</el-button>
         <el-button v-if="paperStore.current.status === 'draft'" :loading="paperStore.saving" @click="savePaper('draft')">保存草稿</el-button>
-        <el-button :loading="paperStore.saving" @click="savePaper('saved')">保存到历史试卷</el-button>
+        <el-button :loading="paperStore.saving" @click="savePaper('saved')">{{ paperStore.current.status === 'saved' ? '另存为新试卷' : '保存到历史试卷' }}</el-button>
         <el-button type="primary" :icon="View" :loading="previewEntering" @click="enterPreview">排版与打印</el-button>
       </div>
     </div>
@@ -702,13 +674,13 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
       <strong>试卷排版与打印</strong>
       <div>
         <el-button v-if="paperStore.current.status === 'draft'" :loading="paperStore.saving" @click="savePaper('draft')">保存草稿</el-button>
-        <el-button :loading="paperStore.saving" @click="savePaper('saved')">保存到历史试卷</el-button>
+        <el-button :loading="paperStore.saving" @click="savePaper('saved')">{{ paperStore.current.status === 'saved' ? '另存为新试卷' : '保存到历史试卷' }}</el-button>
         <el-button
           type="primary"
           :icon="DocumentChecked"
-          :disabled="!paperStore.current.items.length || !appStore.license.capabilities.canExportDocuments"
+          :disabled="!paperStore.current.items.length"
           @click="exportDialogOpen = true"
-        >{{ appStore.license.capabilities.canExportDocuments ? '导出 Word' : '专业版可导出' }}</el-button>
+        >{{ '导出 Word' }}</el-button>
       </div>
     </div>
     <div class="preview-workspace">
@@ -718,7 +690,6 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
         :paper="paperStore.current"
         :template-preview="previewTemplate"
         :question-types="questionTypeDefinitions"
-        :can-print="appStore.license.capabilities.canPrint"
         @changed="onCanvasLayoutChanged"
         @formula-change="onCanvasFormulaChanged"
       >
@@ -781,7 +752,6 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
     :tags="appStore.tags"
     :question-types="appStore.questionTypes"
     :excluded-question-ids="[...paperStore.selectedQuestionIds]"
-    :remaining-capacity="randomDrawRemainingCapacity"
     @add="addRandomQuestions"
   />
 
@@ -967,6 +937,7 @@ async function preparePaperForExport(preparation: PaperExportPreparation): Promi
 
 .selected-panel__header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: 8px;

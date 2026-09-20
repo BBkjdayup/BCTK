@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MoreFilled, Plus, Refresh, Upload } from '@element-plus/icons-vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -274,45 +275,26 @@ async function setDefault(template: WordTemplate) {
   }
 }
 
+onBeforeRouteLeave(() => {
+  if (!busy.value && !configurationOpen.value) return true
+  ElMessage.warning('请先完成当前模板操作。')
+  return false
+})
 onMounted(() => loadTemplates())
 onBeforeUnmount(stopProgress)
 </script>
 
 <template>
-  <div class="app-page">
-    <aside class="page-sidebar template-sidebar">
-      <div class="sidebar-title">模板管理</div>
-      <nav class="sidebar-menu">
-        <button class="sidebar-menu__item" :class="{ 'is-active': mode === 'list' }" @click="showList">
-          <span class="nav-icon" />模板列表
-        </button>
-        <button class="sidebar-menu__item" :class="{ 'is-active': mode === 'analyzing' }" :disabled="busy || !desktopAvailable" @click="startImport">
-          <span class="nav-icon" />导入模板
-        </button>
-      </nav>
-      <div class="sidebar-note">
-        <template v-if="desktopAvailable">只导入 <strong>.docx</strong> 文件。通过安全检查后，软件会复制一份到自己的 templates 目录；原文件不受影响。</template>
-        <template v-else>浏览器只展示模板界面，不会选择、复制或删除电脑中的文件。模板文件操作请使用 Windows 桌面版。</template>
-      </div>
-    </aside>
-
+  <div class="settings-pane">
     <section v-if="mode === 'list'" class="page-main templates-page" v-loading="loading">
-      <div class="surface template-toolbar">
+      <div class="surface template-library">
+      <div class="template-toolbar">
         <span>共 {{ templates.length }} 个模板</span>
         <div class="template-toolbar__actions">
           <el-button :icon="Refresh" :loading="loading" @click="loadTemplates()">刷新</el-button>
-          <el-button type="primary" :icon="Upload" :loading="busy" :disabled="!desktopAvailable" @click="startImport">{{ desktopAvailable ? '导入 .docx' : '桌面版才能导入' }}</el-button>
+          <el-button type="primary" :icon="Upload" :loading="busy" :disabled="!desktopAvailable" @click="startImport">导入 .docx</el-button>
         </div>
       </div>
-
-      <el-alert
-        v-if="!desktopAvailable"
-        class="browser-runtime-note"
-        type="warning"
-        :closable="false"
-        show-icon
-        title="此列表属于浏览器界面演示；导入、重命名、设为默认和删除均已关闭，不会显示虚假的文件操作成功。"
-      />
 
       <div v-if="templates.length" class="template-grid">
         <article
@@ -359,10 +341,9 @@ onBeforeUnmount(stopProgress)
         </button>
       </div>
 
-      <div v-else-if="!loading" class="surface empty-state">
-        <el-empty description="还没有模板">
-          <el-button type="primary" :icon="Upload" :disabled="!desktopAvailable" @click="startImport">{{ desktopAvailable ? '导入第一个 .docx 模板' : '桌面版才能导入模板' }}</el-button>
-        </el-empty>
+      <div v-else-if="!loading" class="empty-state">
+        <el-empty :image-size="72" description="还没有模板" />
+      </div>
       </div>
     </section>
 
@@ -464,18 +445,17 @@ onBeforeUnmount(stopProgress)
 </template>
 
 <style scoped>
-.template-sidebar { padding-top: 2px; }
-.nav-icon { width: 18px; height: 18px; border: 1.5px solid #94a3b8; border-radius: 5px; }
-.sidebar-menu__item.is-active .nav-icon { border-color: #3b82f6; }
-.sidebar-note { margin: 22px 14px; padding: 13px 12px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: #526176; font-size: 11px; line-height: 1.75; }
+.template-library { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: auto; }
+.template-library > .empty-state { flex: 1; min-height: 240px; }
+.template-toolbar { flex-shrink: 0; }
+.settings-pane { display: flex; min-width: 0; min-height: 0; flex: 1; }
 .breadcrumb { margin-bottom: 8px; color: #94a3b8; font-size: 11px; }
-.template-toolbar { min-height: 58px; margin-bottom: 14px; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.template-toolbar { min-height: 58px; border-bottom: 1px solid #edf1f5; padding: 9px 12px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .template-toolbar > span { color: #64748b; font-size: 11px; }
 .template-toolbar__actions { display: flex; align-items: center; gap: 8px; }
 .template-toolbar__actions :deep(.el-button + .el-button) { margin-left: 0; }
-.browser-runtime-note { margin-bottom: 14px; }
 .templates-page, .analyze-page, .detail-page { display: flex; flex-direction: column; }
-.template-grid { display: grid; grid-template-columns: repeat(4, minmax(220px, 1fr)); gap: 14px; }
+.template-grid { padding: 16px; display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
 .template-card { position: relative; min-width: 0; padding: 12px; overflow: hidden; }
 .template-card.is-default { border-color: #2563eb; box-shadow: 0 0 0 1px #2563eb, var(--shadow-sm); }
 .template-card.is-unavailable { border-color: #fca5a5; }

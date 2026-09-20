@@ -9,6 +9,28 @@ function content(html: string, plainText: string): RichContent {
 }
 
 describe('QuestionStemSummary', () => {
+  it('keeps long formulas intact and uses a readable marker for malformed formulas', async () => {
+    const latex = String.raw`\frac{${'a+'.repeat(100)}b}{\sqrt{x_1}}`
+    const wrapper = mount(QuestionStemSummary, { props: { content: content(
+      `<p><span data-latex="${latex}"></span><span data-latex="\\frac{">bad</span></p><div data-latex="x^2"></div>`, '',
+    ) } })
+    await nextTick()
+    expect(wrapper.find('.math-node').attributes('data-latex')).toBe(latex)
+    expect(wrapper.find('.frac-line').exists()).toBe(true)
+    expect(wrapper.findAll('.katex')).toHaveLength(2)
+    expect(wrapper.text()).toContain('〔公式〕')
+    expect(wrapper.find('.katex-error').exists()).toBe(false)
+  })
+
+  it('removes active HTML and styling from legacy summaries', async () => {
+    const wrapper = mount(QuestionStemSummary, { props: { content: content(
+      '<p><a href="javascript:alert(1)">题目</a><span onclick="alert(1)" style="position:fixed">内容</span><svg onload="alert(1)"></svg></p>', '题目内容',
+    ) } })
+    await nextTick()
+    expect(wrapper.find('[onclick], [onload], a, svg, [style*="fixed"]').exists()).toBe(false)
+    expect(wrapper.text()).toContain('题目内容')
+  })
+
   it('renders stored formula nodes instead of exposing LaTeX source', async () => {
     const wrapper = mount(QuestionStemSummary, {
       props: {

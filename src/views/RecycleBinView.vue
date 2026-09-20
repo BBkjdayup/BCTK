@@ -13,7 +13,6 @@ import { questionTypeLabel } from '../utils/questionTypes'
 const store = useQuestionBankStore()
 const appStore = useAppStore()
 const retentionDays = ref(30)
-const recyclePolicy = ref<'manual_only' | 'remind_only'>('remind_only')
 store.initializeFilters({ deleted: true, pageSize: 100 })
 
 onMounted(() => {
@@ -21,7 +20,6 @@ onMounted(() => {
   void backend.getSettings()
     .then((settings) => {
       retentionDays.value = settings.recycleRetentionDays
-      recyclePolicy.value = settings.recyclePolicy
     })
     .catch(() => undefined)
 })
@@ -66,7 +64,7 @@ function daysRemaining(deletedAt?: number | null) {
 <template>
   <section class="page-main recycle-page">
       <div class="recycle-note">
-        <span>已删除题目按设置提醒保留 {{ retentionDays }} 天。{{ recyclePolicy === 'manual_only' ? '只允许你手动清理' : '到期后提醒并由你决定' }}，软件不会自动永久删除。</span>
+        <span>参考保留 {{ retentionDays }} 天，永久删除前均可恢复。</span>
         <div v-if="store.selectedIds.length" class="recycle-note__actions">
           <el-button
             :icon="RefreshLeft"
@@ -94,8 +92,8 @@ function daysRemaining(deletedAt?: number | null) {
           </el-table-column>
           <el-table-column prop="subjectName" label="学科" width="130" />
           <el-table-column prop="chapterName" label="章节" min-width="170" show-overflow-tooltip />
-          <el-table-column label="剩余保留" width="110">
-            <template #default="{ row }"><el-tag size="small" type="warning" effect="plain">{{ daysRemaining(row.deletedAt) }} 天</el-tag></template>
+          <el-table-column label="距建议清理" width="120">
+            <template #default="{ row }"><el-tag size="small" type="warning" effect="plain">{{ daysRemaining(row.deletedAt) > 0 ? `${daysRemaining(row.deletedAt)} 天` : '已到参考期限' }}</el-tag></template>
           </el-table-column>
           <el-table-column label="操作" width="160" fixed="right">
             <template #default="{ row }">

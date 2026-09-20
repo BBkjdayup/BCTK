@@ -15,10 +15,10 @@ use super::models::{
     QuestionDuplicateBatchResultApi, QuestionDuplicateCandidateApi, QuestionDuplicateCheckApi,
     QuestionDuplicateGroupApi, QuestionDuplicateMemberApi, QuestionDuplicateScanRequestApi,
     QuestionDuplicateScanResultApi, QuestionFiltersApi, QuestionOptionApi, QuestionResourceRefApi,
-    RichContentApi, TagApi,
+    QuestionStemSummaryApi, RichContentApi, TagApi,
 };
 use super::{
-    question_types,
+    content_identity, question_types,
     question_usage::{
         UsageConstraint, push_usage_constraint, resolve_usage_constraint, validate_usage_filter,
     },
@@ -627,6 +627,56 @@ pub(crate) async fn list_active_questions_for_export(
     Ok(items)
 }
 
+pub async fn get_question_stem_summaries(
+    pool: &SqlitePool,
+    ids: &[String],
+) -> CommandResult<Vec<QuestionStemSummaryApi>> {
+    if ids.len() > 32 {
+        return Err(CommandError::validation("每次最多读取 32 道题干。"));
+    }
+    let ids = ids
+        .iter()
+        .map(|id| canonical_uuid(id, "题目标识"))
+        .collect::<CommandResult<HashSet<_>>>()?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Transfer only rendering data, without editor documents or answers.
+    // Preserve complete HTML/LaTeX; clamp after rendering instead of truncating source.
+    let mut query = QueryBuilder::<Sqlite>::new(
+        "SELECT id, content_version, COALESCE(json_extract(stem_json, '$.html'), ''), stem_plain \
+         FROM questions WHERE deleted_at_ms IS NULL AND id IN (",
+    );
+    let mut separated = query.separated(", ");
+    for id in &ids {
+        separated.push_bind(id);
+    }
+    separated.push_unseparated(")");
+    let rows = query
+        .build_query_as::<(String, i64, String, String)>()
+        .fetch_all(pool)
+        .await
+        .map_err(CommandError::database)?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, content_version, html, plain_text)| QuestionStemSummaryApi {
+                id,
+                content_version,
+                stem: RichContentApi {
+                    schema_version: 1,
+                    editor: None,
+                    editor_version: None,
+                    document: None,
+                    html,
+                    plain_text,
+                    source_ooxml: None,
+                },
+            },
+        )
+        .collect())
+}
+
 pub async fn get_question(pool: &SqlitePool, id: &str) -> CommandResult<Option<QuestionApi>> {
     let row = sqlx::query_as::<_, QuestionRow>(
         "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
@@ -648,6 +698,9 @@ pub async fn get_question(pool: &SqlitePool, id: &str) -> CommandResult<Option<Q
 }
 
 fn validate_draft(draft: &QuestionDraftApi, behavior: &str) -> CommandResult<()> {
+    if draft.answer_review_required {
+        return Err(CommandError::validation("选项已变化，请先核对并确认答案。"));
+    }
     if draft.options.len() > MAX_OPTIONS {
         return Err(CommandError::validation(format!(
             "一道题最多允许 {MAX_OPTIONS} 个选项。"
@@ -664,18 +717,12 @@ fn validate_draft(draft: &QuestionDraftApi, behavior: &str) -> CommandResult<()>
     for (index, option) in draft.options.iter().enumerate() {
         validate_rich_content(&format!("选项 {}", index + 1), &option.content, false)?;
     }
-    if draft.stem.plain_text.trim().is_empty() {
-        return Err(CommandError::validation("题干不能为空。"));
-    }
-    if draft.answer.plain_text.trim().is_empty() {
-        return Err(CommandError::validation("答案不能为空。"));
-    }
     if matches!(behavior, "single_choice" | "multiple_choice") {
         if draft.options.len() < 2
             || draft
                 .options
                 .iter()
-                .any(|option| option.content.plain_text.trim().is_empty())
+                .any(|option| !content_identity::has_content(&option.content))
         {
             return Err(CommandError::validation("选择题至少需要两个非空选项。"));
         }
@@ -711,9 +758,6 @@ fn validate_rich_content(
     allow_empty: bool,
 ) -> CommandResult<()> {
     validate_rich_document(label, content)?;
-    if !allow_empty && content.plain_text.trim().is_empty() {
-        return Err(CommandError::validation(format!("{label}不能为空。")));
-    }
     if content
         .plain_text
         .chars()
@@ -771,6 +815,9 @@ fn validate_rich_content(
             "UNSAFE_RICH_CONTENT",
             format!("{label}中包含不安全的网页代码，已停止保存。"),
         ));
+    }
+    if !allow_empty && !content_identity::has_content(content) {
+        return Err(CommandError::validation(format!("{label}不能为空。")));
     }
     Ok(())
 }
@@ -867,24 +914,9 @@ fn rich_content_bytes(content: &RichContentApi) -> usize {
         )
 }
 
+#[cfg(test)]
 fn normalized_fingerprint(draft: &QuestionDraftApi) -> Vec<u8> {
-    let combined = format!(
-        "{}\u{1f}{}\u{1f}{}",
-        draft.stem.plain_text,
-        draft
-            .options
-            .iter()
-            .map(|option| option.content.plain_text.as_str())
-            .collect::<Vec<_>>()
-            .join("\u{1e}"),
-        draft.answer.plain_text,
-    );
-    let normalized = combined
-        .nfkc()
-        .flat_map(char::to_lowercase)
-        .filter(|character| !is_duplicate_whitespace(*character))
-        .collect::<String>();
-    Sha256::digest(normalized.as_bytes()).to_vec()
+    content_identity::fingerprint(draft, &HashMap::new())
 }
 
 fn is_duplicate_whitespace(character: char) -> bool {
@@ -942,6 +974,8 @@ fn bounded_raw_character_count<'a>(parts: impl IntoIterator<Item = &'a str>) -> 
 }
 
 fn similarity_prefilter_length_from_draft(draft: &QuestionDraftApi) -> usize {
+    let normalized = content_identity::normalize_search_fields(draft);
+    let draft = &normalized;
     bounded_raw_character_count([draft.stem.plain_text.as_str()])
         .saturating_add(bounded_raw_character_count(
             draft
@@ -956,6 +990,8 @@ fn similarity_prefilter_length_from_draft(draft: &QuestionDraftApi) -> usize {
 }
 
 fn similarity_text_from_draft(draft: &QuestionDraftApi) -> Vec<char> {
+    let normalized = content_identity::normalize_search_fields(draft);
+    let draft = &normalized;
     join_similarity_fields(
         normalized_similarity_field([draft.stem.plain_text.as_str()]),
         normalized_similarity_field(
@@ -1194,9 +1230,18 @@ fn nearest_prior_import_indices(
     candidates
 }
 
+#[cfg(test)]
 fn check_import_duplicates(
     request: &QuestionDuplicateBatchRequestApi,
     scan_id: Option<&str>,
+) -> CommandResult<QuestionDuplicateBatchResultApi> {
+    check_import_duplicates_with_resources(request, scan_id, &HashMap::new())
+}
+
+fn check_import_duplicates_with_resources(
+    request: &QuestionDuplicateBatchRequestApi,
+    scan_id: Option<&str>,
+    resource_hashes: &content_identity::ResourceHashes,
 ) -> CommandResult<QuestionDuplicateBatchResultApi> {
     let mut earlier_by_fingerprint = HashMap::<Vec<u8>, usize>::new();
     let mut prior_by_length = BTreeMap::<i64, Vec<usize>>::new();
@@ -1204,7 +1249,7 @@ fn check_import_duplicates(
     let mut results = Vec::with_capacity(request.items.len());
     for (index, entry) in request.items.iter().enumerate() {
         ensure_duplicate_scan_active(scan_id)?;
-        let fingerprint = normalized_fingerprint(&entry.draft);
+        let fingerprint = content_identity::fingerprint(&entry.draft, resource_hashes);
         let length =
             i64::try_from(similarity_prefilter_length_from_draft(&entry.draft)).unwrap_or(i64::MAX);
         ensure_duplicate_scan_active(scan_id)?;
@@ -1262,7 +1307,7 @@ fn check_import_duplicates(
                     candidate: Some(import_item_duplicate_candidate(
                         request,
                         candidate_index,
-                        similarity,
+                        similarity.min(99),
                     )),
                     evaluated_candidate_count: u32::try_from(candidates.len()).unwrap_or(u32::MAX),
                     suspected_threshold_percent: SUSPECTED_DUPLICATE_THRESHOLD_PERCENT,
@@ -1272,13 +1317,19 @@ fn check_import_duplicates(
                 no_duplicate_check(u32::try_from(candidates.len()).unwrap_or(u32::MAX))
             }
         };
-        earlier_by_fingerprint
-            .entry(fingerprint.clone())
-            .or_insert(index);
+        if content_identity::comparable(&entry.draft, resource_hashes) {
+            earlier_by_fingerprint
+                .entry(fingerprint.clone())
+                .or_insert(index);
+        }
         prior_by_length.entry(length).or_default().push(index);
         results.push(QuestionDuplicateBatchItemResultApi {
             client_id: entry.client_id.clone(),
-            exact_fingerprint: fingerprint_hex(&fingerprint),
+            exact_fingerprint: if content_identity::comparable(&entry.draft, resource_hashes) {
+                fingerprint_hex(&fingerprint)
+            } else {
+                String::new()
+            },
             check,
         });
     }
@@ -1300,7 +1351,10 @@ pub async fn check_question_duplicate(
     }
 
     let excluded_id = draft.question_id.as_deref().unwrap_or("");
-    let fingerprint = normalized_fingerprint(draft);
+    let mut connection = pool.acquire().await.map_err(CommandError::database)?;
+    let resource_hashes = content_identity::resource_hashes(&mut connection, &[draft]).await?;
+    drop(connection);
+    let fingerprint = content_identity::fingerprint(draft, &resource_hashes);
     let field_limit = i64::try_from(MAX_SIMILARITY_FIELD_CHARS).unwrap_or(i64::MAX);
     let exact = sqlx::query_as::<_, DuplicateCandidateRow>(
         "SELECT q.id, q.question_type, substr(q.stem_plain, 1, ?) AS stem_plain, \
@@ -1309,7 +1363,7 @@ pub async fn check_question_duplicate(
          FROM questions q \
          JOIN subjects s ON s.id = q.subject_id \
          JOIN chapters c ON c.id = q.chapter_id \
-         WHERE q.deleted_at_ms IS NULL AND q.fingerprint_version = 1 \
+         WHERE q.deleted_at_ms IS NULL AND q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 \
            AND q.exact_fingerprint = ? AND q.id <> ? \
          ORDER BY q.updated_at_ms DESC, q.id LIMIT 1",
     )
@@ -1319,7 +1373,7 @@ pub async fn check_question_duplicate(
     .fetch_optional(pool)
     .await
     .map_err(CommandError::database)?;
-    if let Some(exact) = exact {
+    if let Some(exact) = exact.filter(|_| content_identity::comparable(draft, &resource_hashes)) {
         return Ok(QuestionDuplicateCheckApi {
             status: "exact".to_owned(),
             candidate: Some(duplicate_candidate_api(exact, 100)),
@@ -1384,7 +1438,7 @@ pub async fn check_question_duplicate(
     Ok(QuestionDuplicateCheckApi {
         status: status.to_owned(),
         candidate: best
-            .map(|(candidate, similarity)| duplicate_candidate_api(candidate, similarity)),
+            .map(|(candidate, similarity)| duplicate_candidate_api(candidate, similarity.min(99))),
         evaluated_candidate_count,
         suspected_threshold_percent: SUSPECTED_DUPLICATE_THRESHOLD_PERCENT,
         similarity_method: SIMILARITY_METHOD.to_owned(),
@@ -1453,8 +1507,16 @@ pub async fn check_question_duplicates_batch(
         }
     }
 
+    let mut connection = pool.acquire().await.map_err(CommandError::database)?;
+    let drafts: Vec<_> = request.items.iter().map(|entry| &entry.draft).collect();
+    let resource_hashes = content_identity::resource_hashes(&mut connection, &drafts).await?;
+    drop(connection);
     if import_only {
-        return check_import_duplicates(request, scan_id.as_deref());
+        return check_import_duplicates_with_resources(
+            request,
+            scan_id.as_deref(),
+            &resource_hashes,
+        );
     }
 
     // One metadata read and one length ordering are shared by every draft in
@@ -1465,7 +1527,7 @@ pub async fn check_question_duplicates_batch(
     let questions = sqlx::query_as::<_, DuplicateScanMetaRow>(
         "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
                 substr(q.stem_plain, 1, ?) AS stem_preview, \
-                s.name AS subject_name, c.name AS chapter_name, q.exact_fingerprint, \
+                s.name AS subject_name, c.name AS chapter_name, CASE WHEN q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 THEN q.exact_fingerprint ELSE CAST(q.id AS BLOB) END AS exact_fingerprint, \
                 q.content_version, q.created_at_ms, q.updated_at_ms, \
                 min(length(q.stem_plain), ?) + min(length(q.options_plain), ?) + \
                 min(length(q.answer_plain), ?) AS similarity_length \
@@ -1498,7 +1560,7 @@ pub async fn check_question_duplicates_batch(
 
     for (entry_index, entry) in request.items.iter().enumerate() {
         ensure_duplicate_scan_active(scan_id.as_deref())?;
-        let fingerprint = normalized_fingerprint(&entry.draft);
+        let fingerprint = content_identity::fingerprint(&entry.draft, &resource_hashes);
         let excluded_id = entry.draft.question_id.as_deref().unwrap_or("");
         let database_exact = exact_by_fingerprint.get(&fingerprint).and_then(|indices| {
             indices
@@ -1524,9 +1586,11 @@ pub async fn check_question_duplicates_batch(
         } else {
             None
         };
-        earlier_in_batch
-            .entry(fingerprint.clone())
-            .or_insert(entry_index);
+        if content_identity::comparable(&entry.draft, &resource_hashes) {
+            earlier_in_batch
+                .entry(fingerprint.clone())
+                .or_insert(entry_index);
+        }
 
         fingerprints.push(fingerprint);
         exact_candidates.push(exact_candidate);
@@ -1641,7 +1705,10 @@ pub async fn check_question_duplicates_batch(
             QuestionDuplicateCheckApi {
                 status: status.to_owned(),
                 candidate: best.map(|(candidate_index, similarity)| {
-                    duplicate_candidate_from_scan_meta(&questions[candidate_index], similarity)
+                    duplicate_candidate_from_scan_meta(
+                        &questions[candidate_index],
+                        similarity.min(99),
+                    )
                 }),
                 evaluated_candidate_count: u32::try_from(candidate_indices.len())
                     .unwrap_or(u32::MAX),
@@ -1651,7 +1718,11 @@ pub async fn check_question_duplicates_batch(
         };
         results.push(QuestionDuplicateBatchItemResultApi {
             client_id: entry.client_id.clone(),
-            exact_fingerprint: fingerprint_hex(&fingerprints[index]),
+            exact_fingerprint: if content_identity::comparable(&entry.draft, &resource_hashes) {
+                fingerprint_hex(&fingerprints[index])
+            } else {
+                String::new()
+            },
             check,
         });
     }
@@ -1780,7 +1851,7 @@ pub async fn scan_question_duplicates(
     let questions = sqlx::query_as::<_, DuplicateScanMetaRow>(
         "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
                 substr(q.stem_plain, 1, ?) AS stem_preview, \
-                s.name AS subject_name, c.name AS chapter_name, q.exact_fingerprint, \
+                s.name AS subject_name, c.name AS chapter_name, CASE WHEN q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 THEN q.exact_fingerprint ELSE CAST(q.id AS BLOB) END AS exact_fingerprint, \
                 q.content_version, q.created_at_ms, q.updated_at_ms, \
                 min(length(q.stem_plain), ?) + min(length(q.options_plain), ?) + \
                 min(length(q.answer_plain), ?) AS similarity_length \
@@ -1961,7 +2032,7 @@ pub async fn scan_question_duplicates(
             suspected_groups.push(QuestionDuplicateGroupApi {
                 id: format!("suspected:{}:{}", pair_ids.0, pair_ids.1),
                 duplicate_kind: "suspected".to_owned(),
-                similarity_percent: similarity,
+                similarity_percent: similarity.min(99),
                 members: members.into_iter().map(duplicate_scan_member).collect(),
             });
         }
@@ -2011,7 +2082,7 @@ pub async fn ignore_question_duplicate(
     };
 
     let current_questions = sqlx::query_as::<_, (String, i64, Vec<u8>)>(
-        "SELECT id, content_version, exact_fingerprint FROM questions \
+        "SELECT id, content_version, CASE WHEN fingerprint_version = 2 AND fingerprint_comparable = 1 THEN exact_fingerprint ELSE CAST(id AS BLOB) END AS exact_fingerprint FROM questions \
          WHERE deleted_at_ms IS NULL AND id IN (?, ?)",
     )
     .bind(&low_id)
@@ -2076,6 +2147,10 @@ async fn save_question_in_connection(
     .map_err(CommandError::database)?
     .ok_or_else(|| CommandError::validation("所选题型不存在或已经停用。"))?;
     validate_draft(draft, &behavior)?;
+    let normalized_draft = content_identity::normalize_search_fields(draft);
+    let draft = &normalized_draft;
+    let resource_hashes = content_identity::resource_hashes(transaction, &[draft]).await?;
+
     let classification_exists: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM chapters WHERE id = ? AND subject_id = ?")
             .bind(&draft.chapter_id)
@@ -2122,7 +2197,7 @@ async fn save_question_in_connection(
         .collect::<Vec<_>>()
         .join(" ");
     let tags_plain = tag_names.join(" ");
-    let fingerprint = normalized_fingerprint(draft);
+    let fingerprint = content_identity::fingerprint(draft, &resource_hashes);
     let now = now_millis();
     if let Some(requested_id) = &draft.question_id {
         if Uuid::parse_str(requested_id).is_err() {
@@ -2229,7 +2304,7 @@ async fn save_question_in_connection(
             "UPDATE questions SET question_type = ?, subject_id = ?, chapter_id = ?, content_schema_version = ?, \
              stem_json = ?, answer_json = ?, explanation_json = ?, stem_plain = ?, \
              options_plain = ?, answer_plain = ?, explanation_plain = ?, tags_plain = ?, \
-             exact_fingerprint = ?, content_version = content_version + 1, updated_at_ms = ? \
+             exact_fingerprint = ?, fingerprint_version = 2, fingerprint_comparable = ?, content_version = content_version + 1, updated_at_ms = ? \
              WHERE id = ? AND content_version = ? AND deleted_at_ms IS NULL",
         )
         .bind(&draft.question_type)
@@ -2245,6 +2320,7 @@ async fn save_question_in_connection(
         .bind(&draft.explanation.plain_text)
         .bind(&tags_plain)
         .bind(&fingerprint)
+        .bind(content_identity::comparable(draft, &resource_hashes))
         .bind(now)
         .bind(&question_id)
         .bind(current_version)
@@ -2268,14 +2344,16 @@ async fn save_question_in_connection(
         sqlx::query(
             "INSERT INTO questions (id, question_type, subject_id, chapter_id, content_schema_version, \
              stem_json, answer_json, explanation_json, stem_plain, options_plain, answer_plain, \
-             explanation_plain, tags_plain, fingerprint_version, exact_fingerprint, content_version, \
-             created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 1, ?, ?)",
+             explanation_plain, tags_plain, fingerprint_version, exact_fingerprint, fingerprint_comparable, content_version, \
+             created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?, 1, ?, ?)",
         )
         .bind(&question_id).bind(&draft.question_type).bind(&draft.subject_id).bind(&draft.chapter_id)
         .bind(i64::from(content_schema_version))
         .bind(&stem_json).bind(&answer_json).bind(&explanation_json)
         .bind(&draft.stem.plain_text).bind(&options_plain).bind(&draft.answer.plain_text)
         .bind(&draft.explanation.plain_text).bind(&tags_plain).bind(&fingerprint)
+        .bind(content_identity::comparable(draft, &resource_hashes))
+        .bind(content_identity::comparable(draft, &resource_hashes))
         .bind(now).bind(now)
         .execute(&mut *transaction).await.map_err(CommandError::database)?;
         1
@@ -3096,6 +3174,7 @@ mod tests {
 
     fn draft(stem: &str, answer: &str) -> QuestionDraftApi {
         QuestionDraftApi {
+            answer_review_required: false,
             id: None,
             question_id: None,
             question_type: "short_answer".to_owned(),
@@ -3146,6 +3225,181 @@ mod tests {
             normalized_fingerprint(&first),
             normalized_fingerprint(&changed_answer)
         );
+    }
+
+    #[test]
+    fn acceptance_image_hashes_and_math_structure_define_exact_identity() {
+        let mut first = draft("图示题", "A");
+        first.stem.html = "<p>图示题<img data-resource-id='one' src='asset://old'></p>".into();
+        let mut second = first.clone();
+        second.stem.html = "<p>图示题<img data-resource-id='two' src='asset://new'></p>".into();
+        let mut hashes = HashMap::from([
+            ("one".into(), "same-sha256".into()),
+            ("two".into(), "same-sha256".into()),
+        ]);
+        assert_eq!(
+            content_identity::fingerprint(&first, &hashes),
+            content_identity::fingerprint(&second, &hashes)
+        );
+        hashes.insert("two".into(), "different-sha256".into());
+        assert_ne!(
+            content_identity::fingerprint(&first, &hashes),
+            content_identity::fingerprint(&second, &hashes)
+        );
+        assert!(!content_identity::comparable(&first, &HashMap::new()));
+        first.stem = rich("<p><span data-latex='x'></span></p>", "");
+        second.stem = rich("<p><span data-latex='X'></span></p>", "");
+        assert_ne!(
+            normalized_fingerprint(&first),
+            normalized_fingerprint(&second)
+        );
+        first.stem = rich("<p>x<sup>2</sup></p>", "x2");
+        second.stem = rich("<p>x2</p>", "x2");
+        assert_ne!(
+            normalized_fingerprint(&first),
+            normalized_fingerprint(&second)
+        );
+        first.stem = rich("<table><tr><td>A</td><td>B</td></tr></table>", "AB");
+        second.stem = rich("<table><tr><td>AB</td></tr></table>", "AB");
+        assert_ne!(
+            normalized_fingerprint(&first),
+            normalized_fingerprint(&second)
+        );
+    }
+
+    #[test]
+    fn acceptance_empty_structures_and_unreviewed_answers_are_rejected() {
+        for html in [
+            "<p><br></p>",
+            "<table><tr><td> </td></tr></table>",
+            "<p><span data-latex=' '></span></p>",
+        ] {
+            assert!(validate_rich_content("答案", &rich(html, "stale cache"), false).is_err());
+        }
+        let mut value = draft("题干", "答案");
+        value.answer_review_required = true;
+        let serialized = serde_json::to_string(&value).unwrap();
+        let recovered: QuestionDraftApi = serde_json::from_str(&serialized).unwrap();
+        assert!(recovered.answer_review_required);
+        assert!(validate_draft(&recovered, "short_answer").is_err());
+    }
+
+    #[tokio::test]
+    async fn acceptance_formula_save_reopen_and_legacy_fingerprint_rebuild() {
+        let root = test_root("acceptance-fingerprint-upgrade");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "验收", "公式").await;
+        let mut value = draft("求导", "");
+        value.subject_id = subject;
+        value.chapter_id = chapter;
+        value.answer = rich("<p><span data-latex='2x'></span></p>", "");
+        let saved = save_question(pool, &value, "test").await.unwrap();
+        assert_eq!(saved.answer.plain_text, "2x");
+        let json = serde_json::to_string(&saved.answer).unwrap();
+        sqlx::query("UPDATE questions SET fingerprint_version = 1, fingerprint_comparable = 0, answer_plain = '', exact_fingerprint = zeroblob(32) WHERE id = ?")
+            .bind(&saved.id).execute(pool).await.unwrap();
+        let mut connection = pool.acquire().await.unwrap();
+        assert_eq!(
+            content_identity::rebuild_pending(&mut connection, None)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            content_identity::rebuild_pending(&mut connection, None)
+                .await
+                .unwrap(),
+            0
+        );
+        let row = sqlx::query_as::<_, (i64, i64, String, String, i64, i64)>(
+            "SELECT fingerprint_version, fingerprint_comparable, answer_plain, answer_json, content_version, updated_at_ms FROM questions WHERE id = ?")
+            .bind(&saved.id).fetch_one(&mut *connection).await.unwrap();
+        assert_eq!((row.0, row.1, row.2.as_str()), (2, 1, "2x"));
+        assert_eq!(row.3, json);
+        assert_eq!((row.4, row.5), (saved.content_version, saved.updated_at));
+        drop(connection);
+        assert_eq!(
+            check_question_duplicate(pool, &value).await.unwrap().status,
+            "exact"
+        );
+        value.answer = rich("<p><span data-latex='3x^2'></span></p>", "");
+        assert_ne!(
+            check_question_duplicate(pool, &value).await.unwrap().status,
+            "exact"
+        );
+        database.close().await;
+        drop(database);
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn stem_summaries_preserve_formula_source_and_only_return_live_rendering_data() {
+        let root = test_root("stem-summary-formulas");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "摘要", "公式").await;
+        let latex = format!(r"\frac{{{}b}}{{\sqrt{{x_1}}}}", "a+".repeat(100));
+        let html = format!(r#"<p><span data-latex="{latex}"></span>求值</p>"#);
+        let mut value = draft("公式求值", "答案不应进入摘要");
+        value.subject_id = subject;
+        value.chapter_id = chapter;
+        value.stem = rich(&html, "公式求值");
+        let saved = save_question(pool, &value, "test").await.unwrap();
+        // Simulate editor-only metadata without coupling this read API to a specific editor.
+        sqlx::query("UPDATE questions SET stem_json = json_set(stem_json, '$.document', json('{\"privateEditorData\":true}'), '$.sourceOoxml', 'editor-only') WHERE id = ?")
+            .bind(&saved.id).execute(pool).await.unwrap();
+        let rows = get_question_stem_summaries(
+            pool,
+            &[
+                saved.id.clone(),
+                saved.id.clone(),
+                Uuid::now_v7().to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].stem.html, saved.stem.html);
+        assert!(rows[0].stem.html.contains(&latex));
+        assert_eq!(rows[0].content_version, saved.content_version);
+        assert!(rows[0].stem.document.is_none());
+        assert!(rows[0].stem.source_ooxml.is_none());
+        assert!(
+            !serde_json::to_string(&rows)
+                .unwrap()
+                .contains("答案不应进入摘要")
+        );
+        assert!(
+            get_question_stem_summaries(pool, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            get_question_stem_summaries(pool, &vec![saved.id.clone(); 33])
+                .await
+                .is_err()
+        );
+        assert!(
+            get_question_stem_summaries(pool, &["invalid-id".into()])
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE questions SET deleted_at_ms = 1 WHERE id = ?")
+            .bind(&saved.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            get_question_stem_summaries(pool, &[saved.id])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        database.close().await;
+        drop(database);
+        remove_test_root(&root);
     }
 
     #[test]
@@ -4143,5 +4397,80 @@ mod tests {
         database.close().await;
         drop(database);
         remove_test_root(&root);
+    }
+    #[test]
+    fn acceptance_different_formula_questions_are_not_exact_duplicates() {
+        let mut first = draft("求导：", "结果为：");
+        first.stem.html =
+            "<p>求导：<span class=\"math-node\" data-latex=\"x^2\">x^2</span></p>".to_owned();
+        first.answer.html =
+            "<p>结果为：<span class=\"math-node\" data-latex=\"2x\">2x</span></p>".to_owned();
+        let mut second = first.clone();
+        second.stem.html =
+            "<p>求导：<span class=\"math-node\" data-latex=\"x^3\">x^3</span></p>".to_owned();
+        second.answer.html =
+            "<p>结果为：<span class=\"math-node\" data-latex=\"3x^2\">3x^2</span></p>".to_owned();
+        let request = QuestionDuplicateBatchRequestApi {
+            items: vec![
+                super::super::models::QuestionDuplicateBatchEntryApi {
+                    client_id: "first".to_owned(),
+                    draft: first,
+                },
+                super::super::models::QuestionDuplicateBatchEntryApi {
+                    client_id: "second".to_owned(),
+                    draft: second,
+                },
+            ],
+            mode: Some("import".to_owned()),
+            scan_id: None,
+        };
+        let result = check_import_duplicates(&request, None).unwrap();
+        println!(
+            "DIFFERENT_FORMULAS: status={}, similarity={}",
+            result.items[1].check.status,
+            result.items[1]
+                .check
+                .candidate
+                .as_ref()
+                .map(|candidate| candidate.similarity_percent)
+                .unwrap_or(0)
+        );
+        assert_ne!(
+            result.items[1].check.status, "exact",
+            "x^2 and x^3 have different answers and must not be exact duplicates"
+        );
+    }
+
+    #[test]
+    fn acceptance_math_only_content_is_valid() {
+        let content = rich(
+            "<p><span class=\"math-node\" data-latex=\"x^2\">x^2</span></p>",
+            "",
+        );
+        let result = validate_rich_content("答案", &content, false);
+        println!("MATH_ONLY_VALIDATION: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "A visible formula must be accepted as a nonempty answer"
+        );
+    }
+
+    #[test]
+    fn acceptance_different_managed_images_are_not_exact_duplicates() {
+        let mut first = draft("观察下图，选择正确选项。", "A");
+        first.stem.html = format!(
+            "<p>观察下图，选择正确选项。<img data-resource-id=\"{}\"></p>",
+            Uuid::now_v7()
+        );
+        let mut second = first.clone();
+        second.stem.html = format!(
+            "<p>观察下图，选择正确选项。<img data-resource-id=\"{}\"></p>",
+            Uuid::now_v7()
+        );
+        assert_ne!(
+            normalized_fingerprint(&first),
+            normalized_fingerprint(&second),
+            "Different figures must not share an exact-duplicate fingerprint"
+        );
     }
 }

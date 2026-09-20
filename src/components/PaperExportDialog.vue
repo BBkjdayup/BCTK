@@ -146,21 +146,25 @@ async function exportPaper() {
   exporting.value = true
   formError.value = ''
   exportResult.value = null
+  const preparation = {
+    title: paperTitle.value,
+    contentMode: contentMode.value,
+    templateId: selectedTemplateId.value,
+  }
+  const requestedOutputPath = outputPath.value
   try {
-    exportStage.value = '正在保存当前试卷与题目快照…'
-    const savedPaper = await props.preparePaper({
-      title: paperTitle.value,
-      contentMode: contentMode.value,
-      templateId: selectedTemplateId.value,
-    })
+    exportStage.value = '正在准备试卷快照…'
+    const savedPaper = await props.preparePaper(preparation)
     emit('paper-saved', savedPaper)
 
     exportStage.value = '正在读取模板并生成 Word 文件…'
     const result = await backend.exportPaperDocx({
       paperId: savedPaper.id,
       expectedPaperRowVersion: savedPaper.rowVersion,
-      templateId: selectedTemplateId.value,
-      outputPath: outputPath.value,
+      templateId: preparation.templateId,
+      outputPath: requestedOutputPath,
+      title: preparation.title,
+      contentMode: preparation.contentMode,
     })
     exportResult.value = result
     if (!result.exported) {
@@ -169,7 +173,7 @@ async function exportPaper() {
     }
     ElMessage.success('Word 文件已真实生成并写入所选位置。')
   } catch (reason) {
-    formError.value = errorMessage(reason, 'Word 导出失败，试卷已保存，但没有报告文件生成成功。')
+    formError.value = errorMessage(reason, 'Word 导出未完成，请检查提示后重试。')
   } finally {
     exporting.value = false
     exportStage.value = ''
@@ -309,7 +313,7 @@ function goToTemplateConfiguration() {
         <el-form v-if="!loadError" label-position="top" class="export-form">
           <el-form-item label="试卷标题" required>
             <el-input v-model="paperTitle" maxlength="200" show-word-limit placeholder="请输入试卷标题" />
-            <div class="field-help">导出前会先按这个标题保存当前试卷与题目快照。</div>
+            <div class="field-help">此处的标题、内容模式和模板仅用于本次导出，不改写历史试卷。编辑区未保存的修改会先另存为新卷，草稿则先归档。</div>
           </el-form-item>
 
           <el-form-item label="Word 模板" required>
@@ -409,7 +413,7 @@ function goToTemplateConfiguration() {
           :disabled="!canExport"
           @click="exportPaper"
         >
-          {{ exporting ? '正在导出' : '保存试卷并导出 Word' }}
+          {{ exporting ? '正在导出' : '导出 Word' }}
         </el-button>
       </template>
     </template>

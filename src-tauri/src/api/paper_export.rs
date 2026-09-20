@@ -9,6 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Sqlite, SqlitePool, Transaction};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 use zip::{ZipWriter, write::SimpleFileOptions};
 
@@ -558,6 +559,26 @@ fn perform_export(templates_dir: &Path, snapshot: &WorkerSnapshot) -> CommandRes
     })
 }
 
+fn apply_export_options(
+    paper: &mut PaperExportRow,
+    request: &ExportPaperDocxRequestApi,
+) -> CommandResult<()> {
+    if let Some(title) = &request.title {
+        let title = title.trim().nfkc().collect::<String>().trim().to_owned();
+        if title.is_empty() || title.chars().count() > 200 {
+            return Err(CommandError::validation("导出标题须为 1 至 200 个字符。"));
+        }
+        paper.title = title;
+    }
+    if let Some(mode) = &request.content_mode {
+        if PaperContentMode::parse(mode).is_none() {
+            return Err(CommandError::validation("导出内容模式不受支持。"));
+        }
+        paper.export_content_mode = mode.clone();
+    }
+    Ok(())
+}
+
 async fn load_snapshot(
     pool: &SqlitePool,
     paths: &DatabasePaths,
@@ -566,7 +587,7 @@ async fn load_snapshot(
     output_filename: String,
 ) -> CommandResult<ExportSnapshot> {
     let mut transaction = pool.begin().await.map_err(CommandError::database)?;
-    let paper = sqlx::query_as::<_, PaperExportRow>(
+    let mut paper = sqlx::query_as::<_, PaperExportRow>(
         "SELECT id, title, paper_status, export_content_mode, layout_json, row_version \
          FROM papers WHERE id = ?",
     )
@@ -587,6 +608,7 @@ async fn load_snapshot(
             "请先把当前试卷保存到历史试卷，再执行 Word 导出。",
         ));
     }
+    apply_export_options(&mut paper, request)?;
     let mode = PaperContentMode::parse(&paper.export_content_mode).ok_or_else(|| {
         CommandError::new(
             "PAPER_EXPORT_CONTENT_MODE_UNSUPPORTED",
@@ -1457,6 +1479,164 @@ mod tests {
         assert!(build_rich_paper("试卷", &[item], PaperContentMode::PaperAndAnswers).is_err());
     }
 
+    #[tokio::test]
+    async fn archive_save_and_export_preserve_original_sqlite_snapshot() {
+        use crate::api::{models::PaperApi, papers};
+        let root = std::env::temp_dir().join(format!("tk-paper-archive-test-{}", Uuid::now_v7()));
+        let database = Database::open(&root, "test").await.unwrap();
+        let item_id = Uuid::now_v7().to_string();
+        let paper: PaperApi = serde_json::from_value(json!({
+            "id": Uuid::now_v7().to_string(), "title": "原历史试卷", "compositionMode": "manual",
+            "status": "saved", "items": [{ "id": item_id, "position": 0, "snapshot": question() }],
+            "exportContentMode": "paper_only", "subjectSummaryText": "数学",
+            "rowVersion": 0, "createdAt": 0, "updatedAt": 0
+        }))
+        .unwrap();
+        let original = papers::save_paper(database.pool(), &paper, "test")
+            .await
+            .unwrap();
+        let original_json = serde_json::to_value(&original).unwrap();
+        let mut edit = original.clone();
+        edit.title = "不能覆盖".into();
+        edit.items[0].snapshot.stem = rich("<p>修改后的题目</p>", "修改后的题目");
+        let error = papers::save_paper(database.pool(), &edit, "test")
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "PAPER_ARCHIVE_IMMUTABLE");
+        edit.status = "draft".into();
+        assert_eq!(
+            papers::save_paper(database.pool(), &edit, "test")
+                .await
+                .unwrap_err()
+                .code,
+            "PAPER_ARCHIVE_IMMUTABLE"
+        );
+        edit.id = Uuid::now_v7().to_string();
+        edit.row_version = 0;
+        // Reusing the original item ID must roll back the entire new-paper transaction.
+        assert!(
+            papers::save_paper(database.pool(), &edit, "test")
+                .await
+                .is_err()
+        );
+        assert!(
+            papers::get_paper(database.pool(), &edit.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        edit.items[0].id = Uuid::now_v7().to_string();
+        let draft = papers::save_paper(database.pool(), &edit, "test")
+            .await
+            .unwrap();
+        edit = draft;
+        edit.title = "草稿继续修改".into();
+        let draft = papers::save_paper(database.pool(), &edit, "test")
+            .await
+            .unwrap();
+        edit = draft;
+        edit.status = "saved".into();
+        let next = papers::save_paper(database.pool(), &edit, "test")
+            .await
+            .unwrap();
+        assert_ne!(next.id, original.id);
+
+        let template_id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO word_templates (
+            id, name, name_key, file_rel_path, file_sha256, file_byte_size,
+            analysis_status, analysis_schema_version, analysis_json, parser_version,
+            row_version, created_at_ms, updated_at_ms
+        ) VALUES (?, '测试模板', '测试模板', '00000000-0000-7000-8000-000000000000.docx',
+                  zeroblob(32), 0, 'ready', 1, '{}', 'test', 1, 0, 0)",
+        )
+        .bind(&template_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+        let mut request = ExportPaperDocxRequestApi {
+            paper_id: original.id.clone(),
+            expected_paper_row_version: original.row_version,
+            template_id,
+            output_path: root.join("export-test.docx").to_string_lossy().into_owned(),
+            title: Some("仅本次导出标题".into()),
+            content_mode: Some("answers_only".into()),
+        };
+        let snapshot = load_snapshot(
+            database.pool(),
+            database.paths(),
+            &request,
+            request.output_path.clone(),
+            "export-test.docx".into(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(snapshot.paper.title, "仅本次导出标题");
+        assert_eq!(snapshot.paper.export_content_mode, "answers_only");
+        let rich_paper =
+            build_rich_paper(&snapshot.paper.title, &snapshot.questions, snapshot.mode).unwrap();
+        assert!(!rich_paper.items.is_empty());
+        request.title = Some(" ".into());
+        assert!(
+            load_snapshot(
+                database.pool(),
+                database.paths(),
+                &request,
+                request.output_path.clone(),
+                "test.docx".into()
+            )
+            .await
+            .is_err()
+        );
+        request.title = Some("标题".repeat(201));
+        assert!(
+            load_snapshot(
+                database.pool(),
+                database.paths(),
+                &request,
+                request.output_path.clone(),
+                "test.docx".into()
+            )
+            .await
+            .is_err()
+        );
+        request.title = None;
+        request.content_mode = Some("invalid".into());
+        assert!(
+            load_snapshot(
+                database.pool(),
+                database.paths(),
+                &request,
+                request.output_path.clone(),
+                "test.docx".into()
+            )
+            .await
+            .is_err()
+        );
+        request.content_mode = None;
+        request.expected_paper_row_version += 1;
+        assert_eq!(
+            load_snapshot(
+                database.pool(),
+                database.paths(),
+                &request,
+                request.output_path.clone(),
+                "test.docx".into()
+            )
+            .await
+            .err()
+            .unwrap()
+            .code,
+            "PAPER_VERSION_CONFLICT"
+        );
+        let reread = papers::get_paper(database.pool(), &original.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(serde_json::to_value(reread).unwrap(), original_json);
+        database.close().await;
+    }
+
     #[test]
     fn built_in_question_bank_template_is_a_safe_docx_with_question_anchor() {
         let bytes = question_bank_template().unwrap();
@@ -1483,6 +1663,26 @@ mod tests {
             paper.items[0].stem.blocks[0],
             crate::docx::PaperBlock::Table(_)
         ));
+    }
+
+    #[test]
+    fn acceptance_formula_only_answer_exports_as_editable_omml() {
+        let mut item = question();
+        item.answer = rich("<p><span data-latex='x^{2}'></span></p>", "");
+        let paper = build_rich_paper("验收", &[item], PaperContentMode::PaperAndAnswers).unwrap();
+        let template = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>{{ZT_QUESTIONS}}</w:t></w:r></w:p></w:body></w:document>"#;
+        let rendered = crate::docx::render_rich_paper_document_xml_with_styles(
+            template,
+            &paper,
+            &BTreeMap::new(),
+            None,
+            &DocxLimits::default(),
+        )
+        .unwrap();
+        let xml = String::from_utf8(rendered.document_xml).unwrap();
+        assert!(xml.contains("<m:oMath"));
+        assert!(xml.contains("<m:sSup>"));
+        assert!(!xml.contains("x^{2}"));
     }
 
     #[test]

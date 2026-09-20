@@ -18,7 +18,6 @@ use crate::docx::{
     TemplateStyleSelection, configure_template_package, preview_template_configuration,
     preview_template_layout,
 };
-use crate::licensing::{LicenseFileResult, LicenseOverview};
 use crate::restore as restore_workflow;
 
 use super::{
@@ -33,14 +32,15 @@ use super::{
         ExcelImportTemplateResultApi, ExcelWorkbookInspectionApi, ExportPaperDocxRequestApi,
         IgnoreQuestionDuplicateRequestApi, ImportedQuestionOverwriteRequestApi,
         ImportedQuestionOverwriteResultApi, ManagedImagePayloadApi, PageResultApi, PaperApi,
-        PaperDeleteRequestApi, PaperDocxExportResultApi, PaperFiltersApi, PaperSummaryApi,
-        QuestionApi, QuestionBankExportResultApi, QuestionBatchEditRequestApi,
+        PaperDeleteRequestApi, PaperDocxExportResultApi, PaperFiltersApi, PaperRecoveryApi,
+        PaperSummaryApi, QuestionApi, QuestionBankExportResultApi, QuestionBatchEditRequestApi,
         QuestionBatchEditResultApi, QuestionDraftApi, QuestionDraftRecordApi,
         QuestionDuplicateBatchRequestApi, QuestionDuplicateBatchResultApi,
         QuestionDuplicateCheckApi, QuestionDuplicateScanRequestApi, QuestionDuplicateScanResultApi,
-        QuestionFiltersApi, QuestionTypeDefinitionApi, RandomDrawAnalysisApi, RandomDrawRequestApi,
-        RandomDrawScopeApi, ReadWpsClipboardImagesRequestApi, RestorePlanApi, RestoreResultApi,
-        RestoreScheduledApi, SaveDocumentEntryTemplateRequestApi, SaveQuestionTypeRequestApi,
+        QuestionFiltersApi, QuestionStemSummaryApi, QuestionTypeDefinitionApi,
+        RandomDrawAnalysisApi, RandomDrawRequestApi, RandomDrawScopeApi,
+        ReadWpsClipboardImagesRequestApi, RestorePlanApi, RestoreResultApi, RestoreScheduledApi,
+        SaveDocumentEntryTemplateRequestApi, SaveQuestionTypeRequestApi,
         ScheduleDataMoveRequestApi, ScheduleRestoreRequestApi, StoreManagedImagesRequestApi,
         SubjectApi, TagApi, TaxonomyOrderItemApi, TemplateAnchorApi, TemplateByteSpanApi,
         TemplateConfigurationParagraphApi, TemplateConfigurationPreviewApi,
@@ -95,7 +95,6 @@ pub async fn app_initialize(state: State<'_, AppState>) -> CommandResult<Bootstr
                 database_healthy: false,
                 database_error: state.initialization_error().await,
                 app_version: state.app_version().to_owned(),
-                license: state.license().overview(),
             });
         }
     };
@@ -176,67 +175,7 @@ pub async fn app_initialize(state: State<'_, AppState>) -> CommandResult<Bootstr
         database_healthy: true,
         database_error: None,
         app_version: state.app_version().to_owned(),
-        license: state.license().overview(),
     })
-}
-
-#[tauri::command]
-pub async fn get_license_overview(state: State<'_, AppState>) -> CommandResult<LicenseOverview> {
-    Ok(state.license().overview())
-}
-
-#[tauri::command]
-pub async fn export_license_request(
-    state: State<'_, AppState>,
-    output_path: String,
-) -> CommandResult<LicenseFileResult> {
-    let output = PathBuf::from(output_path.trim());
-    if output
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_none_or(|value| !value.eq_ignore_ascii_case("tkreq"))
-    {
-        return Err(CommandError::new(
-            "LICENSE_REQUEST_EXTENSION_INVALID",
-            "授权申请必须保存为 .tkreq 文件。",
-        ));
-    }
-    state
-        .license()
-        .export_activation_request(&output)
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn import_desktop_license(
-    state: State<'_, AppState>,
-    input_path: String,
-) -> CommandResult<LicenseOverview> {
-    let input = PathBuf::from(input_path.trim());
-    if input
-        .extension()
-        .and_then(|value| value.to_str())
-        .is_none_or(|value| !value.eq_ignore_ascii_case("tklic"))
-    {
-        return Err(CommandError::new(
-            "LICENSE_EXTENSION_INVALID",
-            "桌面许可证必须是 .tklic 文件。",
-        ));
-    }
-    state
-        .license()
-        .import_desktop_license(&input)
-        .map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn remove_desktop_license(state: State<'_, AppState>) -> CommandResult<LicenseOverview> {
-    state.license().remove_desktop_license().map_err(Into::into)
-}
-
-#[tauri::command]
-pub async fn check_print_authorization(state: State<'_, AppState>) -> CommandResult<()> {
-    state.license().require_print().map_err(Into::into)
 }
 
 #[tauri::command]
@@ -313,6 +252,15 @@ pub async fn get_question(
 }
 
 #[tauri::command]
+pub async fn get_question_stem_summaries(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> CommandResult<Vec<QuestionStemSummaryApi>> {
+    let database = state.database().await?;
+    questions::get_question_stem_summaries(database.pool(), &ids).await
+}
+
+#[tauri::command]
 pub async fn check_question_duplicate(
     state: State<'_, AppState>,
     draft: QuestionDraftApi,
@@ -367,7 +315,6 @@ pub async fn save_questions(
     state: State<'_, AppState>,
     drafts: Vec<QuestionDraftApi>,
 ) -> CommandResult<Vec<QuestionApi>> {
-    state.license().require_batch_import()?;
     let database = state.database().await?;
     questions::save_questions(database.pool(), &drafts, state.app_version()).await
 }
@@ -377,7 +324,6 @@ pub async fn save_imported_questions(
     state: State<'_, AppState>,
     drafts: Vec<QuestionDraftApi>,
 ) -> CommandResult<Vec<String>> {
-    state.license().require_batch_import()?;
     let database = state.database().await?;
     questions::save_imported_questions(database.pool(), &drafts, state.app_version()).await
 }
@@ -387,7 +333,6 @@ pub async fn save_imported_question_overwrites(
     state: State<'_, AppState>,
     request: ImportedQuestionOverwriteRequestApi,
 ) -> CommandResult<ImportedQuestionOverwriteResultApi> {
-    state.license().require_batch_import()?;
     let database = state.database().await?;
     questions::save_imported_question_overwrites(database.pool(), &request, state.app_version())
         .await
@@ -398,7 +343,6 @@ pub async fn save_imported_question(
     state: State<'_, AppState>,
     draft: QuestionDraftApi,
 ) -> CommandResult<QuestionApi> {
-    state.license().require_batch_import()?;
     let database = state.database().await?;
     questions::save_question(database.pool(), &draft, state.app_version()).await
 }
@@ -569,9 +513,6 @@ pub async fn get_paper(state: State<'_, AppState>, id: String) -> CommandResult<
 
 #[tauri::command]
 pub async fn save_paper(state: State<'_, AppState>, paper: PaperApi) -> CommandResult<PaperApi> {
-    state
-        .license()
-        .validate_paper_question_count(paper.items.len())?;
     let database = state.database().await?;
     papers::save_paper(database.pool(), &paper, state.app_version()).await
 }
@@ -583,16 +524,33 @@ pub async fn copy_paper(
     base_row_version: i64,
 ) -> CommandResult<PaperApi> {
     let database = state.database().await?;
-    let question_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM paper_items WHERE paper_id = ?")
-            .bind(&id)
-            .fetch_one(database.pool())
-            .await
-            .map_err(CommandError::database)?;
-    state
-        .license()
-        .validate_paper_question_count(usize::try_from(question_count).unwrap_or(usize::MAX))?;
     papers::copy_paper(database.pool(), &id, base_row_version, state.app_version()).await
+}
+
+#[tauri::command]
+pub async fn get_paper_recovery(
+    state: State<'_, AppState>,
+) -> CommandResult<Option<PaperRecoveryApi>> {
+    let database = state.database().await?;
+    papers::get_paper_recovery(database.pool()).await
+}
+
+#[tauri::command]
+pub async fn save_paper_recovery(
+    state: State<'_, AppState>,
+    paper: PaperApi,
+) -> CommandResult<PaperRecoveryApi> {
+    let database = state.database().await?;
+    papers::save_paper_recovery(database.pool(), &paper).await
+}
+
+#[tauri::command]
+pub async fn clear_paper_recovery(
+    state: State<'_, AppState>,
+    revision: String,
+) -> CommandResult<()> {
+    let database = state.database().await?;
+    papers::clear_paper_recovery(database.pool(), &revision).await
 }
 
 #[tauri::command]
@@ -619,7 +577,6 @@ pub async fn export_paper_docx(
     state: State<'_, AppState>,
     request: ExportPaperDocxRequestApi,
 ) -> CommandResult<PaperDocxExportResultApi> {
-    state.license().require_document_export()?;
     // Export holds the maintenance write lease so another app command cannot
     // change the persisted paper snapshot or managed template mid-export.
     let database = state.exclusive_database().await?;
@@ -632,7 +589,6 @@ pub async fn export_question_bank(
     format: String,
     output_path: String,
 ) -> CommandResult<QuestionBankExportResultApi> {
-    state.license().require_document_export()?;
     // A maintenance read lease blocks restore/data-move switching while still
     // allowing ordinary question editing during a long export. The exporter
     // takes its own SQLite read transaction for a consistent content snapshot.
@@ -1775,7 +1731,6 @@ pub async fn begin_word_import(
     state: State<'_, AppState>,
     request: AnalyzeDocxRequestApi,
 ) -> CommandResult<BeginWordImportResultApi> {
-    state.license().require_batch_import()?;
     let database = state.exclusive_database().await?;
     let prepared = tokio::task::spawn_blocking(move || docx::prepare_word_import(request))
         .await
@@ -1809,7 +1764,6 @@ pub async fn begin_excel_import(
     state: State<'_, AppState>,
     request: ExcelImportRequestApi,
 ) -> CommandResult<BeginExcelImportResultApi> {
-    state.license().require_batch_import()?;
     let database = state.exclusive_database().await?;
     let prepared = tokio::task::spawn_blocking(move || excel_import::prepare_import(request))
         .await
@@ -1866,92 +1820,6 @@ pub async fn read_wps_clipboard_images(
                 format!("WPS 剪贴板图片读取任务未能正常完成：{error}"),
             )
         })?
-}
-
-#[tauri::command]
-pub async fn pick_license_request_save_path(
-    app: AppHandle,
-    suggested_name: String,
-) -> CommandResult<Option<String>> {
-    let default_directory = app
-        .path()
-        .desktop_dir()
-        .or_else(|_| app.path().document_dir())
-        .map_err(|error| {
-            CommandError::new(
-                "LICENSE_DIALOG_DIRECTORY_FAILED",
-                format!("无法确定授权申请默认保存目录：{error}"),
-            )
-        })?;
-    let suggested_name = suggested_name.trim();
-    let suggested_name = if suggested_name.len() <= 120
-        && suggested_name.to_ascii_lowercase().ends_with(".tkreq")
-        && !suggested_name.contains(['/', '\\', ':'])
-    {
-        suggested_name.to_owned()
-    } else {
-        "TK试题题库离线授权申请.tkreq".to_owned()
-    };
-    tokio::task::spawn_blocking(move || {
-        let selected = app
-            .dialog()
-            .file()
-            .set_title("保存本机离线授权申请")
-            .set_directory(default_directory)
-            .set_file_name(suggested_name)
-            .add_filter("TK离线授权申请", &["tkreq"])
-            .blocking_save_file();
-        selected
-            .map(|path| {
-                path.into_path()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .map_err(|error| {
-                        CommandError::new(
-                            "LICENSE_DIALOG_PATH_INVALID",
-                            format!("无法读取授权申请保存路径：{error}"),
-                        )
-                    })
-            })
-            .transpose()
-    })
-    .await
-    .map_err(|error| {
-        CommandError::new(
-            "LICENSE_DIALOG_TASK_FAILED",
-            format!("授权申请保存窗口未能正常完成：{error}"),
-        )
-    })?
-}
-
-#[tauri::command]
-pub async fn pick_desktop_license_file(app: AppHandle) -> CommandResult<Option<String>> {
-    tokio::task::spawn_blocking(move || {
-        let selected = app
-            .dialog()
-            .file()
-            .set_title("选择桌面专业许可证")
-            .add_filter("TK桌面许可证", &["tklic"])
-            .blocking_pick_file();
-        selected
-            .map(|path| {
-                path.into_path()
-                    .map(|path| path.to_string_lossy().into_owned())
-                    .map_err(|error| {
-                        CommandError::new(
-                            "LICENSE_DIALOG_PATH_INVALID",
-                            format!("无法读取所选许可证路径：{error}"),
-                        )
-                    })
-            })
-            .transpose()
-    })
-    .await
-    .map_err(|error| {
-        CommandError::new(
-            "LICENSE_DIALOG_TASK_FAILED",
-            format!("许可证选择窗口未能正常完成：{error}"),
-        )
-    })?
 }
 
 #[tauri::command]

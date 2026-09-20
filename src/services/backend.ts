@@ -20,16 +20,16 @@ import type {
   ExcelWorkbookInspection,
   ManagedImagePayload,
   StoreManagedImageInput,
-  LicenseFileResult,
-  LicenseOverview,
   PageResult,
   Paper,
+  PaperRecovery,
   PaperDeleteRequest,
   PaperDocxExportRequest,
   PaperDocxExportResult,
   PaperFilters,
   PaperSummary,
   Question,
+  QuestionStemSummary,
   QuestionBatchEditRequest,
   QuestionBatchEditResult,
   QuestionDraft,
@@ -58,13 +58,6 @@ import type {
   SaveQuestionTypeRequest,
   TaxonomyOrderItem,
   ConfigureTemplateRegionsRequest,
-  CloudAccountStatus,
-  CloudLoginRequest,
-  CloudRegisterRequest,
-  CloudSyncResult,
-  CloudSyncPreflight,
-  CloudSyncConflict,
-  ResolveCloudSyncConflictRequest,
   TemplateConfigurationPreview,
   TemplateLayoutPreview,
   TemplateImportResult,
@@ -131,6 +124,12 @@ export const backend = {
 
   getQuestion(id: string): Promise<Question | null> {
     return isTauriRuntime() ? call('get_question', { id }) : mockBackend.getQuestion(id)
+  },
+
+  getQuestionStemSummaries(ids: string[]): Promise<QuestionStemSummary[]> {
+    return isTauriRuntime()
+      ? call('get_question_stem_summaries', { ids })
+      : mockBackend.getQuestionStemSummaries(ids)
   },
 
   checkQuestionDuplicate(draft: QuestionDraft): Promise<QuestionDuplicateCheck> {
@@ -249,6 +248,24 @@ export const backend = {
 
   savePaper(paper: Paper): Promise<Paper> {
     return isTauriRuntime() ? call('save_paper', { paper }) : mockBackend.savePaper(paper)
+  },
+
+  getPaperRecovery(): Promise<PaperRecovery | null> {
+    if (isTauriRuntime()) return call('get_paper_recovery')
+    return Promise.resolve(JSON.parse(localStorage.getItem('zhitiku-preview-paper-recovery') ?? 'null') as PaperRecovery | null)
+  },
+
+  savePaperRecovery(paper: Paper): Promise<PaperRecovery> {
+    if (isTauriRuntime()) return call('save_paper_recovery', { paper })
+    const record: PaperRecovery = { paper: structuredClone(paper), revision: crypto.randomUUID(), autosavedAt: Date.now() }
+    localStorage.setItem('zhitiku-preview-paper-recovery', JSON.stringify(record))
+    return Promise.resolve(record)
+  },
+
+  async clearPaperRecovery(revision: string): Promise<void> {
+    if (isTauriRuntime()) return call('clear_paper_recovery', { revision })
+    const record = await this.getPaperRecovery()
+    if (record?.revision === revision) localStorage.removeItem('zhitiku-preview-paper-recovery')
   },
 
   copyPaper(id: string, baseRowVersion: number): Promise<Paper> {
@@ -575,108 +592,6 @@ export const backend = {
 
   pickXlsxFile(): Promise<string | null> {
     return isTauriRuntime() ? call('pick_xlsx_file') : Promise.resolve(null)
-  },
-
-  getLicenseOverview(): Promise<LicenseOverview> {
-    return isTauriRuntime() ? call('get_license_overview') : mockBackend.getLicenseOverview()
-  },
-
-  getCloudAccountStatus(): Promise<CloudAccountStatus> {
-    return isTauriRuntime()
-      ? call('get_cloud_account_status')
-      : Promise.resolve({
-          configured: false,
-          apiBaseUrl: '',
-          loggedIn: false,
-          user: null,
-          entitlement: null,
-          canSync: false,
-          databaseBound: false,
-          lastSyncAtMs: null,
-          conflictCount: 0,
-          message: '浏览器演示不连接云服务。',
-        })
-  },
-
-  setCloudApiUrl(apiBaseUrl: string): Promise<CloudAccountStatus> {
-    return isTauriRuntime()
-      ? call('set_cloud_api_url', { apiBaseUrl })
-      : this.getCloudAccountStatus()
-  },
-
-  cloudLogin(request: CloudLoginRequest): Promise<CloudAccountStatus> {
-    return isTauriRuntime()
-      ? call('cloud_login', { request })
-      : this.getCloudAccountStatus()
-  },
-
-  cloudRegister(request: CloudRegisterRequest): Promise<CloudAccountStatus> {
-    return isTauriRuntime()
-      ? call('cloud_register', { request })
-      : this.getCloudAccountStatus()
-  },
-
-  cloudLogout(): Promise<CloudAccountStatus> {
-    return isTauriRuntime()
-      ? call('cloud_logout')
-      : this.getCloudAccountStatus()
-  },
-
-  cloudSyncNow(): Promise<CloudSyncResult> {
-    return isTauriRuntime()
-      ? call('cloud_sync_now')
-      : Promise.reject(new Error('浏览器演示不支持云同步'))
-  },
-
-  getCloudSyncPreflight(): Promise<CloudSyncPreflight> {
-    return isTauriRuntime()
-      ? call('get_cloud_sync_preflight')
-      : Promise.resolve({
-          localEntityCount: 0,
-          localQuestionCount: 0,
-          cloudEntityCount: 0,
-          cloudQuestionCount: 0,
-          localHasData: false,
-          cloudHasData: false,
-          bothNonEmpty: false,
-          recommendedMode: 'merge',
-        })
-  },
-
-  listCloudSyncConflicts(): Promise<CloudSyncConflict[]> {
-    return isTauriRuntime()
-      ? call('list_cloud_sync_conflicts')
-      : Promise.resolve([])
-  },
-
-  resolveCloudSyncConflict(request: ResolveCloudSyncConflictRequest): Promise<CloudSyncConflict[]> {
-    return isTauriRuntime()
-      ? call('resolve_cloud_sync_conflict', { request })
-      : Promise.resolve([])
-  },
-
-  pickLicenseRequestSavePath(suggestedName: string): Promise<string | null> {
-    return isTauriRuntime() ? call('pick_license_request_save_path', { suggestedName }) : Promise.resolve(null)
-  },
-
-  exportLicenseRequest(outputPath: string): Promise<LicenseFileResult> {
-    return isTauriRuntime() ? call('export_license_request', { outputPath }) : mockBackend.exportLicenseRequest(outputPath)
-  },
-
-  pickDesktopLicenseFile(): Promise<string | null> {
-    return isTauriRuntime() ? call('pick_desktop_license_file') : Promise.resolve(null)
-  },
-
-  importDesktopLicense(inputPath: string): Promise<LicenseOverview> {
-    return isTauriRuntime() ? call('import_desktop_license', { inputPath }) : mockBackend.importDesktopLicense(inputPath)
-  },
-
-  removeDesktopLicense(): Promise<LicenseOverview> {
-    return isTauriRuntime() ? call('remove_desktop_license') : mockBackend.removeDesktopLicense()
-  },
-
-  checkPrintAuthorization(): Promise<void> {
-    return isTauriRuntime() ? call('check_print_authorization') : Promise.resolve()
   },
 
   pickXlsxSavePath(suggestedName: string): Promise<string | null> {

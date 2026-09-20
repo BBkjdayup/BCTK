@@ -3,7 +3,6 @@ import { createPinia, setActivePinia } from 'pinia'
 import { backend } from '../services/backend'
 import type { BootstrapData } from '../types/domain'
 import { useAppStore } from './app'
-import { basicLicenseOverview } from '../utils/licensing'
 
 function bootstrap(questionCount: number): BootstrapData {
   return {
@@ -27,7 +26,6 @@ function bootstrap(questionCount: number): BootstrapData {
     pendingDraftCount: 0,
     databaseHealthy: true,
     appVersion: '0.1.0',
-    license: basicLicenseOverview('test-device'),
   }
 }
 

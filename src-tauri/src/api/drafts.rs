@@ -1710,6 +1710,7 @@ mod tests {
                 ordinal: 1,
                 selected: true,
                 payload: QuestionDraftApi {
+                    answer_review_required: false,
                     id: None,
                     question_id: None,
                     question_type: "short_answer".to_owned(),
@@ -1743,6 +1744,7 @@ mod tests {
                 id: item_id,
                 ordinal: 1,
                 payload: QuestionDraftApi {
+                    answer_review_required: false,
                     id: None,
                     question_id: None,
                     question_type: "short_answer".to_owned(),

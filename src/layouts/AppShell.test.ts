@@ -1,6 +1,7 @@
 import { mount } from '@vue/test-utils'
 import { nextTick, reactive } from 'vue'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createPinia, setActivePinia } from 'pinia'
 import AppShell from './AppShell.vue'
 
 const push = vi.fn()
@@ -10,10 +11,6 @@ const appStore = {
   databaseHealthy: true,
   loading: false,
   initialized: true,
-  license: {
-    desktop: { state: 'basic', plan: 'basic' },
-    capabilities: { canPrint: false },
-  },
   error: null,
   createInitialSubject: vi.fn(),
   retryDatabase: vi.fn(),
@@ -33,6 +30,8 @@ vi.mock('@tauri-apps/api/window', () => ({
     minimize: vi.fn(),
     toggleMaximize: vi.fn(),
     close: vi.fn(),
+    destroy: vi.fn(),
+    onCloseRequested: vi.fn().mockResolvedValue(() => undefined),
   }),
 }))
 
@@ -60,11 +59,11 @@ function renderShell() {
   })
 }
 
+beforeEach(() => setActivePinia(createPinia()))
+
 afterEach(() => {
   setDesktopRuntime(false)
   route.path = '/questions'
-  appStore.license.desktop.state = 'basic'
-  appStore.license.desktop.plan = 'basic'
   vi.clearAllMocks()
 })
 
@@ -86,17 +85,17 @@ describe('AppShell runtime identity', () => {
 
     expect(wrapper.find('.browser-preview-banner').exists()).toBe(false)
     expect(wrapper.get('.titlebar__version').text()).toContain('Windows 桌面版')
-    expect(wrapper.get('.topnav__status').text()).toContain('基础桌面模式')
+    expect(wrapper.get('.topnav__status').text()).toContain('免费离线版')
   })
 
-  it('identifies the built-in professional trial separately from a paid license', async () => {
+  it('allows system printing without a license or account', () => {
     setDesktopRuntime(true)
-    appStore.license.desktop.state = 'active'
-    appStore.license.desktop.plan = 'trial'
     const wrapper = renderShell()
-    await nextTick()
-
-    expect(wrapper.get('.topnav__status').text()).toContain('桌面专业版试用')
+    const event = new KeyboardEvent('keydown', { key: 'p', ctrlKey: true, cancelable: true })
+    window.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(wrapper.text()).not.toContain('试用')
+    wrapper.unmount()
   })
 
   it('gives the exact question-entry route priority over the question-bank prefix', async () => {

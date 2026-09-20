@@ -8,10 +8,34 @@ import { useAppStore } from '../stores/app'
 import { errorMessage } from '../services/errors'
 import { isDesktopRuntime } from '../services/backend'
 import { suppressUnconfiguredContextMenu } from '../utils/contextMenuGuard'
+import { usePaperStore } from '../stores/paper'
+import { canCloseApplication, registerCloseGuard } from '../services/closeProtection'
 
 const route = useRoute()
 const router = useRouter()
 const appStore = useAppStore()
+const paperStore = usePaperStore()
+let unlistenClose: (() => void) | undefined
+let shellActive = true
+let closing = false
+const removePaperGuard = registerCloseGuard(() => paperStore.prepareToClose(), 100)
+
+function warnBeforeClose(event: BeforeUnloadEvent) {
+  if (!paperStore.isDirty && !paperStore.saving) return
+  event.preventDefault()
+  event.returnValue = ''
+}
+
+async function restorePaper() {
+  try {
+    if (await paperStore.recoverPaper()) await router.push('/papers')
+  } catch (reason) { ElMessage.error(errorMessage(reason, '恢复试卷失败')) }
+}
+
+async function discardRecovery() {
+  try { await paperStore.discardPendingRecovery() }
+  catch (reason) { ElMessage.error(errorMessage(reason, '丢弃草稿失败，草稿仍保留')) }
+}
 const firstSubjectName = ref('')
 const creatingSubject = ref(false)
 const skipOnboarding = ref(false)
@@ -23,8 +47,7 @@ const navItems = [
   { label: '题目录入', path: '/questions/new', matches: ['/questions/new', '/questions/document', '/word-import'] },
   { label: '选题组卷', path: '/papers', matches: ['/papers'] },
   { label: '历史试卷', path: '/history', matches: ['/history'] },
-  { label: '模板管理', path: '/templates', matches: ['/templates'] },
-  { label: '数据备份与恢复', path: '/data', matches: ['/data'] },
+  { label: '小程序管理', path: '/mini-program', matches: ['/mini-program'] },
   { label: '题库统计', path: '/statistics', matches: ['/statistics'] },
   { label: '系统设置', path: '/settings', matches: ['/settings'] },
 ]
@@ -39,27 +62,35 @@ const activePath = computed(() => {
 const desktopModeLabel = computed(() => {
   if (!desktopAvailable) return '浏览器演示模式'
   if (!appStore.databaseHealthy) return '数据库异常'
-  const professional = appStore.license.desktop.state === 'active' || appStore.license.desktop.state === 'grace'
-  if (!professional) return '基础桌面模式'
-  return appStore.license.desktop.plan === 'trial' ? '桌面专业版试用' : '桌面专业版'
+  return '免费离线版'
 })
 
-function guardSystemPrintShortcut(event: KeyboardEvent) {
-  if (!(event.ctrlKey || event.metaKey) || event.key.toLocaleLowerCase() !== 'p') return
-  if (appStore.license.capabilities.canPrint) return
-  event.preventDefault()
-  event.stopPropagation()
-  ElMessage.warning('基础桌面模式不支持打印或系统“打印为 PDF”；单题录入和最多 10 题组卷仍可使用。')
-}
-
-onMounted(() => {
+onMounted(async () => {
   window.addEventListener('contextmenu', suppressUnconfiguredContextMenu)
-  window.addEventListener('keydown', guardSystemPrintShortcut, true)
+  window.addEventListener('beforeunload', warnBeforeClose)
+  if (desktopAvailable) {
+    try {
+      const remove = await getCurrentWindow().onCloseRequested(async (event) => {
+        event.preventDefault()
+        if (closing) return
+        closing = true
+        try {
+          if (await canCloseApplication()) await getCurrentWindow().destroy()
+        } catch (reason) { ElMessage.error(errorMessage(reason, '关闭前保存失败，窗口保持打开')) }
+        finally { closing = false }
+      })
+      if (shellActive) unlistenClose = remove
+      else remove()
+    } catch (reason) { ElMessage.error(errorMessage(reason, '关闭保护未能启动，请先保存再退出')) }
+  }
 })
 
 onBeforeUnmount(() => {
+  shellActive = false
+  unlistenClose?.()
+  removePaperGuard()
+  window.removeEventListener('beforeunload', warnBeforeClose)
   window.removeEventListener('contextmenu', suppressUnconfiguredContextMenu)
-  window.removeEventListener('keydown', guardSystemPrintShortcut, true)
 })
 
 async function minimize() {
@@ -71,7 +102,12 @@ async function toggleMaximize() {
 }
 
 async function closeWindow() {
-  if (desktopAvailable) await getCurrentWindow().close()
+  if (!desktopAvailable || closing) return
+  closing = true
+  try {
+    if (await canCloseApplication()) await getCurrentWindow().destroy()
+  } catch (reason) { ElMessage.error(errorMessage(reason, '关闭前保存失败，窗口保持打开')) }
+  finally { closing = false }
 }
 
 async function createFirstSubject() {
@@ -111,6 +147,18 @@ async function createFirstSubject() {
       <span>不会读写真实文件；Word / Excel 导入、模板导入、备份恢复、目录选择和数据迁移只能在桌面版执行。</span>
     </div>
 
+    <el-dialog :model-value="Boolean(paperStore.pendingRecovery)" title="恢复上次试卷" width="600px"
+      :show-close="false" :close-on-click-modal="false" :close-on-press-escape="false">
+      <div v-if="paperStore.pendingRecovery">
+      <strong>发现上次未保存的试卷“{{ paperStore.pendingRecovery.paper.title || '未命名试卷' }}”</strong>
+      <p>恢复后可继续编辑，并另存为草稿或历史试卷。</p>
+      </div>
+      <template #footer>
+        <el-button :disabled="paperStore.transitioning" @click="discardRecovery">丢弃草稿</el-button>
+        <el-button type="primary" :loading="paperStore.transitioning" @click="restorePaper">恢复试卷</el-button>
+      </template>
+    </el-dialog>
+    <div v-if="paperStore.recoveryError" class="browser-preview-banner" role="alert">{{ paperStore.recoveryError }}</div>
     <nav class="topnav">
       <div class="topnav__items">
         <button
