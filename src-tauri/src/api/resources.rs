@@ -26,7 +26,7 @@ use super::models::{
 
 const WORD_IMPORT_DRAFT_KEY: &str = "word_import:active";
 const WORD_IMPORT_DRAFT_KIND: &str = "word_import_preview";
-const WORD_IMPORT_PARSER_VERSION: &str = "w1-ooxml-images-formulas-tables-7";
+const WORD_IMPORT_PARSER_VERSION: &str = "w1-ooxml-images-formulas-tables-8";
 const MAX_RESOURCE_REFS_PER_QUESTION: usize = 512;
 const MAX_WPS_CLIPBOARD_IMAGES: usize = 512;
 const MAX_WPS_CLIPBOARD_IMAGE_BYTES: u64 = 4 * 1024 * 1024;

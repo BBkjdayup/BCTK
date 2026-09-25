@@ -23,7 +23,7 @@ const wordImportDraftPayload = (): WordImportDraftPayload => {
   const itemId = '018f47f4-6322-7a0a-9d03-0242ac120002'
   return {
     schemaVersion: 1,
-    sourceFileName: '  Ｌｅｓｓｏｎ．ｄｏｃｘ  ',
+    sourceFileName: '  精品解析：2026年江苏无锡市中考物理试题（原卷版）(1).docx  ',
     sourceFileSize: 1_024,
     parserVersion: '  ｗ１-ooxml-1  ',
     sourceItemCount: 1,
@@ -684,7 +684,7 @@ describe('mockBackend', () => {
 
     const saved = await backend.saveWordImportDraft(wordImportDraftPayload())
     expect(saved.payload).toMatchObject({
-      sourceFileName: 'Lesson.docx',
+      sourceFileName: '精品解析：2026年江苏无锡市中考物理试题（原卷版）(1).docx',
       parserVersion: 'w1-ooxml-1',
       sourceItemCount: 1,
       omittedItemCount: 0,
@@ -692,7 +692,7 @@ describe('mockBackend', () => {
     })
     expect(JSON.parse(localStorage.getItem('zhitiku-preview-word-import-draft') ?? 'null')).toMatchObject({
       id: saved.id,
-      payload: { sourceFileName: 'Lesson.docx' },
+      payload: { sourceFileName: '精品解析：2026年江苏无锡市中考物理试题（原卷版）(1).docx' },
     })
     expect((await backend.initialize()).pendingDraftCount).toBe(2)
 

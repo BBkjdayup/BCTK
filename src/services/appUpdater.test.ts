@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { DownloadEvent } from '@tauri-apps/plugin-updater'
 
 const mocks = vi.hoisted(() => ({ check: vi.fn() }))
 
@@ -11,12 +12,13 @@ function fakeUpdate() {
     date: '2026-09-05T05:00:00Z',
     body: '修复同步并增加自动更新',
     close: vi.fn().mockResolvedValue(undefined),
-    downloadAndInstall: vi.fn().mockImplementation(async (onEvent) => {
-      onEvent({ event: 'Started', data: { contentLength: 100 } })
-      onEvent({ event: 'Progress', data: { chunkLength: 40 } })
-      onEvent({ event: 'Progress', data: { chunkLength: 60 } })
-      onEvent({ event: 'Finished' })
+    download: vi.fn().mockImplementation(async (onEvent?: (event: DownloadEvent) => void) => {
+      onEvent?.({ event: 'Started', data: { contentLength: 100 } })
+      onEvent?.({ event: 'Progress', data: { chunkLength: 40 } })
+      onEvent?.({ event: 'Progress', data: { chunkLength: 60 } })
+      onEvent?.({ event: 'Finished' })
     }),
+    install: vi.fn().mockResolvedValue(undefined),
   }
 }
 
@@ -34,10 +36,15 @@ describe('appUpdater', () => {
     expect(mocks.check).toHaveBeenCalledWith({ timeout: 15_000 })
   })
 
-  it('keeps update details and reports verified install progress', async () => {
+  it('downloads a verified package in the background and installs it later', async () => {
     const update = fakeUpdate()
     mocks.check.mockResolvedValue(update)
-    const { checkForAppUpdate, installPendingAppUpdate } = await import('./appUpdater')
+    const {
+      checkForAppUpdate,
+      downloadPendingAppUpdate,
+      hasDownloadedAppUpdate,
+      installDownloadedAppUpdate,
+    } = await import('./appUpdater')
 
     await expect(checkForAppUpdate()).resolves.toEqual({
       currentVersion: '0.1.73',
@@ -46,18 +53,53 @@ describe('appUpdater', () => {
       notes: '修复同步并增加自动更新',
     })
     const progress: Array<{ phase: string, percent: number | null }> = []
-    await installPendingAppUpdate((event) => progress.push({ phase: event.phase, percent: event.percent }))
+    await downloadPendingAppUpdate((event) => progress.push({ phase: event.phase, percent: event.percent }))
 
-    expect(update.downloadAndInstall).toHaveBeenCalledWith(expect.any(Function), {
+    expect(update.download).toHaveBeenCalledWith(expect.any(Function), {
       timeout: 600_000,
-      restartAfterInstall: true,
     })
+    expect(hasDownloadedAppUpdate()).toBe(true)
+    await expect(checkForAppUpdate()).resolves.toMatchObject({ version: '0.1.74' })
+    expect(mocks.check).toHaveBeenCalledTimes(1)
+    await installDownloadedAppUpdate()
+    expect(update.install).toHaveBeenCalledWith({ restartAfterInstall: true })
+    expect(hasDownloadedAppUpdate()).toBe(false)
     expect(progress).toEqual([
       { phase: 'downloading', percent: 0 },
       { phase: 'downloading', percent: 40 },
       { phase: 'downloading', percent: 100 },
+      { phase: 'downloaded', percent: 100 },
+    ])
+  })
+
+  it('reuses an already downloaded package for a manual immediate install', async () => {
+    const update = fakeUpdate()
+    mocks.check.mockResolvedValue(update)
+    const { checkForAppUpdate, downloadPendingAppUpdate, installPendingAppUpdate } = await import('./appUpdater')
+
+    await checkForAppUpdate()
+    await downloadPendingAppUpdate()
+    const progress: Array<{ phase: string, percent: number | null }> = []
+    await installPendingAppUpdate((event) => progress.push({ phase: event.phase, percent: event.percent }))
+
+    expect(update.download).toHaveBeenCalledTimes(1)
+    expect(update.install).toHaveBeenCalledWith({ restartAfterInstall: true })
+    expect(progress).toEqual([
+      { phase: 'downloaded', percent: 100 },
       { phase: 'installing', percent: 100 },
     ])
+  })
+
+  it('clears a failed background download so a later startup can retry', async () => {
+    const update = fakeUpdate()
+    update.download.mockRejectedValueOnce(new Error('network unavailable'))
+    mocks.check.mockResolvedValue(update)
+    const { checkForAppUpdate, downloadPendingAppUpdate, hasDownloadedAppUpdate } = await import('./appUpdater')
+
+    await checkForAppUpdate()
+    await expect(downloadPendingAppUpdate()).rejects.toThrow('network unavailable')
+    expect(hasDownloadedAppUpdate()).toBe(false)
+    expect(update.close).toHaveBeenCalledTimes(1)
   })
 
   it('deduplicates simultaneous update checks', async () => {

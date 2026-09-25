@@ -125,6 +125,66 @@ function thirdPaperLines() {
   return builder.lines
 }
 
+describe('Word question boundaries around option letters', () => {
+  it('keeps A/B/C references in a choice stem before the real options', () => {
+    const builder = lineBuilder()
+    builder.add('一、选择题（共1题）')
+    builder.add('1. 比较 A、B、C 三点温度，哪项正确？')
+    builder.add('A、甲')
+    builder.add('B、乙')
+    builder.add('C、丙')
+    builder.add('D、丁')
+    builder.add('【答案】A')
+
+    const [question] = recognizeWordQuestions(builder.lines)
+
+    expect(question?.stemLines.map((line) => line.text).join('')).toContain('A、B、C 三点温度')
+    expect(question?.options.map((option) => option.map((line) => line.text).join(''))).toEqual(['甲', '乙', '丙', '丁'])
+  })
+
+  it('keeps A/B references and unit symbols in a fill-in stem', () => {
+    const builder = lineBuilder()
+    builder.add('1. A、B两点的温度差为_____°C)，把配重移到（a/b）端。')
+    builder.add('【答案】B')
+    builder.add('【详解】按题图读数。')
+
+    const [question] = recognizeWordQuestions(builder.lines)
+
+    expect(question?.type).toBe('fill_blank')
+    expect(question?.options).toEqual([])
+    expect(question?.stemLines.map((line) => line.text).join('')).toContain('A、B两点')
+    expect(question?.stemLines.map((line) => line.text).join('')).toContain('（a/b）端')
+  })
+
+  it('keeps inline choices and later numbered subquestions in a multi-blank stem', () => {
+    const builder = lineBuilder()
+    builder.add('1. 第一空_____，第二空_____。 A．甲 B．乙 C．丙')
+    builder.add('（3）请说明理由。')
+    builder.add('【答案】甲；乙')
+
+    const [question] = recognizeWordQuestions(builder.lines)
+
+    expect(question?.type).toBe('fill_blank')
+    expect(question?.options).toEqual([])
+    expect(question?.stemLines.map((line) => line.text).join('\n')).toContain('A．甲 B．乙 C．丙')
+    expect(question?.stemLines.map((line) => line.text).join('\n')).toContain('（3）请说明理由。')
+  })
+
+  it('returns to the stem when a choice question continues with another subquestion', () => {
+    const builder = lineBuilder()
+    builder.add('一、选择题（共1题）')
+    builder.add('1. 请选择正确项。')
+    builder.add('A. 甲')
+    builder.add('B. 乙')
+    builder.add('（2）补充说明。')
+
+    const [question] = recognizeWordQuestions(builder.lines)
+
+    expect(question?.options.map((option) => option.map((line) => line.text).join(''))).toEqual(['甲', '乙'])
+    expect(question?.stemLines.map((line) => line.text).join('\n')).toContain('（2）补充说明。')
+  })
+})
+
 describe('Word question recognition compatibility', () => {
   it('round-trips the exported 33-question bank without treating answers or explanations as questions', () => {
     const builder = lineBuilder()
@@ -412,6 +472,81 @@ describe('Word question recognition compatibility', () => {
     expect(question?.explanationLines.map((line) => line.text)).toEqual([
       '从投资者(业主)角度分析，工程造价是指建设一项工程预期或实际开支的全部固定资产投资费用。',
       '从市场交易角度分析，工程造价是指在工程发承包交易活动中形成的建筑安装工程费用。',
+    ])
+  })
+
+  it('separates bracketed answers, details and subquestion details before parsing option letters', () => {
+    const builder = lineBuilder()
+    builder.add('一、选择题（共1题）')
+    builder.add('1. 声音的特性是（　　）')
+    builder.add('A. 音色')
+    builder.add('B. 音调')
+    builder.add('C. 响度')
+    builder.add('D. 速度')
+    builder.add('【答案】A', [imageOccurrence('answer', 6, 5)])
+    builder.add('【解析】')
+    builder.add('【详解】A．音色用于区分不同发声体；')
+    builder.add('B．音调表示声音的高低。')
+    builder.add('故选A。')
+    builder.add('二、填空题（共1题）')
+    builder.add('2. 声音由物体________产生，通过________传播。')
+    builder.add('【答案】①. 振动')
+    builder.add('②. 空气')
+    builder.add('【解析】')
+    builder.add('【小问1详解】')
+    builder.add('发声体正在振动。')
+    builder.add('【小问2详解】声音需要介质传播。')
+
+    const questions = recognizeWordQuestions(builder.lines)
+    const [choice, fillBlank] = questions
+
+    expect(questions).toHaveLength(2)
+    expect(choice?.options.map((option) => option.map((line) => line.text))).toEqual([
+      ['音色'],
+      ['音调'],
+      ['响度'],
+      ['速度'],
+    ])
+    expect(choice?.answerLines.map((line) => line.text)).toEqual(['A'])
+    expect(choice?.answerLines[0]?.images[0]?.resourceId).toBe('resource-answer')
+    expect(choice?.explanationLines.map((line) => line.text)).toEqual([
+      'A．音色用于区分不同发声体；',
+      'B．音调表示声音的高低。',
+      '故选A。',
+    ])
+    expect(fillBlank?.stemLines.map((line) => line.text)).toEqual([
+      '声音由物体________产生，通过________传播。',
+    ])
+    expect(fillBlank?.answerLines.map((line) => line.text)).toEqual([
+      '①. 振动',
+      '②. 空气',
+    ])
+    expect(fillBlank?.explanationLines.map((line) => line.text)).toEqual([
+      '小问1：',
+      '发声体正在振动。',
+      '小问2：声音需要介质传播。',
+    ])
+  })
+
+  it('accepts common offline answer and explanation marker variants', () => {
+    const builder = lineBuilder()
+    builder.add('第1题 下列说法正确的是？')
+    builder.add('A. 甲')
+    builder.add('B. 乙')
+    builder.add('[正确答案] B')
+    builder.add('点评：乙符合题意。')
+    builder.add('知识点：基础概念。')
+
+    const [question] = recognizeWordQuestions(builder.lines)
+
+    expect(question?.answerLines.map((line) => line.text)).toEqual(['B'])
+    expect(question?.explanationLines.map((line) => line.text)).toEqual([
+      '点评：乙符合题意。',
+      '知识点：基础概念。',
+    ])
+    expect(question?.options.map((option) => option.map((line) => line.text))).toEqual([
+      ['甲'],
+      ['乙'],
     ])
   })
 })

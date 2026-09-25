@@ -7,7 +7,7 @@ import { backend, isDesktopRuntime } from './services/backend'
 import { errorMessage } from './services/errors'
 import { useAppStore } from './stores/app'
 import { usePaperStore } from './stores/paper'
-import { checkAndOfferAppUpdate } from './utils/appUpdateFlow'
+import { checkAndStageAppUpdate } from './utils/appUpdateFlow'
 
 const appStore = useAppStore()
 let appUpdateTimer: ReturnType<typeof setTimeout> | null = null
@@ -15,16 +15,11 @@ let appUpdateTimer: ReturnType<typeof setTimeout> | null = null
 onMounted(async () => {
   await appStore.initialize()
   if (appStore.databaseHealthy) await usePaperStore().initializeRecovery()
-  if (!isDesktopRuntime()) return
+  if (!isDesktopRuntime() || !appStore.databaseHealthy) return
 
   appUpdateTimer = setTimeout(() => {
-    void checkAndOfferAppUpdate({ automatic: true }).catch(() => {
-      // Update checks are best effort. Network failures must not interrupt
-      // startup or the teacher's offline workflow.
-    })
+    void checkAndStageAppUpdate()
   }, 8_000)
-
-  if (!appStore.databaseHealthy) return
 
   try {
     const result = await backend.runAutomaticBackup()

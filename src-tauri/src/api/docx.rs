@@ -82,6 +82,7 @@ pub(super) fn prepare_word_import(
         })?;
     let limits = DocxLimits {
         allow_mathtype_ole: true,
+        allow_ignored_header_footer_external_images: true,
         ..DocxLimits::default()
     };
     let source_bytes = read_source_bounded(&source.canonical, limits.max_archive_bytes)?;
@@ -823,6 +824,11 @@ pub(super) fn diagnostics_from_error(error: DocxError) -> Vec<DocxDiagnosticApi>
             Some(part_name),
             format!("XML 在第 {position} 字节附近无效：{message}"),
         )],
+        DocxError::Image { part_name, message } => vec![synthetic_diagnostic(
+            "DOCX_IMAGE_INVALID",
+            Some(part_name.clone()),
+            format!("文档中的{part_name}无法导入：{message}"),
+        )],
         DocxError::LimitExceeded {
             resource,
             limit,
@@ -1169,7 +1175,13 @@ mod tests {
         assert!(!paths.is_empty(), "at least one DOCX fixture is required");
         let analysis_output =
             std::env::var_os("ZHITIKU_WORD_IMPORT_ANALYSIS_DIR").map(PathBuf::from);
+        let prepared_output =
+            std::env::var_os("ZHITIKU_WORD_IMPORT_PREPARED_DIR").map(PathBuf::from);
         if let Some(output) = &analysis_output {
+            std::fs::create_dir_all(output)
+                .unwrap_or_else(|error| panic!("{}: {error}", output.display()));
+        }
+        if let Some(output) = &prepared_output {
             std::fs::create_dir_all(output)
                 .unwrap_or_else(|error| panic!("{}: {error}", output.display()));
         }
@@ -1188,6 +1200,66 @@ mod tests {
                 let json = serde_json::to_vec(&prepared.analysis)
                     .expect("DOCX analysis must serialize for the bridge regression");
                 std::fs::write(output.join(format!("analysis-{index}.json")), json)
+                    .unwrap_or_else(|error| panic!("{}: {error}", output.display()));
+            }
+            if let Some(output) = &prepared_output {
+                let images = prepared
+                    .images
+                    .iter()
+                    .enumerate()
+                    .map(|(image_index, image)| {
+                        serde_json::json!({
+                            "nodeId": format!("10000000-0000-4000-8000-{image_index:012x}"),
+                            "resourceId": format!("20000000-0000-4000-8000-{image_index:012x}"),
+                            "paragraphIndex": image.paragraph_index,
+                            "textCharOffset": image.text_char_offset,
+                            "originalFilename": image.original_filename,
+                            "mimeType": image.mime_type,
+                            "byteSize": image.byte_size,
+                            "widthPx": image.width_px,
+                            "heightPx": image.height_px,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let formulas = prepared
+                    .formulas
+                    .iter()
+                    .enumerate()
+                    .map(|(formula_index, formula)| {
+                        serde_json::json!({
+                            "nodeId": format!("30000000-0000-4000-8000-{formula_index:012x}"),
+                            "paragraphIndex": formula.paragraph_index,
+                            "textCharOffset": formula.text_char_offset,
+                            "latex": formula.latex,
+                            "sourceKind": formula.source_kind,
+                            "productVersion": formula.product_version,
+                            "productSubversion": formula.product_subversion,
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let tables = prepared
+                    .tables
+                    .iter()
+                    .map(|table| {
+                        serde_json::json!({
+                            "tableIndex": table.index,
+                            "rows": table.rows.iter().map(|row| {
+                                row.iter().map(|cell| serde_json::json!({
+                                    "paragraphIndices": cell.paragraph_indices,
+                                })).collect::<Vec<_>>()
+                            }).collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let regression_fixture = serde_json::json!({
+                    "analysis": &prepared.analysis,
+                    "images": images,
+                    "formulas": formulas,
+                    "tables": tables,
+                });
+                let json = serde_json::to_vec(&regression_fixture)
+                    .expect("prepared Word fixture should serialize");
+                std::fs::write(output.join(format!("prepared-{index}.json")), json)
                     .unwrap_or_else(|error| panic!("{}: {error}", output.display()));
             }
         }

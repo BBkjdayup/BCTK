@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { QuestionDraft, RichContent } from '../types/domain'
 import {
   applyWordImportBatchClassification,
+  applyWordImportBatchTags,
   canOpenWordImportDuplicateDialog,
   pendingWordImportItems,
   planWordImportOverwrites,
@@ -117,6 +118,20 @@ describe('Word import batch processing', () => {
     expect(pending).toHaveLength(15)
     expect(pending.some((item) => item.id === selected[4]?.id && item.selected)).toBe(true)
     expect(pending.filter((item) => !item.selected)).toHaveLength(14)
+  })
+
+  it('adds and removes tags only on selected questions without replacing their other tags', () => {
+    const items = [
+      { id: '1', selected: true, tagIds: ['old'] },
+      { id: '2', selected: false, tagIds: ['old'] },
+      { id: '3', selected: true, tagIds: ['new'] },
+    ]
+
+    expect(applyWordImportBatchTags(items, ['new', 'new'], 'add').map((item) => item.id)).toEqual(['1'])
+    expect(items.map((item) => item.tagIds)).toEqual([['old', 'new'], ['old'], ['new']])
+    expect(applyWordImportBatchTags(items, ['old'], 'remove').map((item) => item.id)).toEqual(['1'])
+    expect(items.map((item) => item.tagIds)).toEqual([['new'], ['old'], ['new']])
+    expect(applyWordImportBatchTags(items, [], 'add')).toEqual([])
   })
 
   it('does not allow a conflict decision while the complete duplicate scan is still running', () => {

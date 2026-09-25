@@ -20,7 +20,7 @@ const saving = ref(false)
 const savedSnapshot = ref('')
 const desktopAvailable = isDesktopRuntime()
 const updateBusy = ref(false)
-const updateStatus = ref('启动时自动检查更新')
+const updateStatus = ref('启动后后台下载更新，正常关闭软件时自动安装')
 const appLogoPath = '/tk-logo.png'
 
 const form = reactive<AppSettings>({
@@ -63,6 +63,8 @@ async function checkAppUpdateManually() {
       updateStatus.value = `当前 ${appStore.appVersion} 已是最新版本。`
     } else if (result.outcome === 'deferred') {
       updateStatus.value = `发现 ${result.update?.version ?? '新版本'}，已选择稍后安装。`
+    } else if (result.outcome === 'staged') {
+      updateStatus.value = `新版本 ${result.update?.version ?? ''} 已在后台下载，关闭软件时会自动安装。`
     } else {
       updateStatus.value = '更新已下载，正在启动安装程序。'
     }

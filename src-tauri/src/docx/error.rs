@@ -13,6 +13,10 @@ pub enum DocxError {
         position: u64,
         message: String,
     },
+    Image {
+        part_name: String,
+        message: String,
+    },
     LimitExceeded {
         resource: String,
         limit: u64,
@@ -54,6 +58,9 @@ impl fmt::Display for DocxError {
                 formatter,
                 "invalid XML in {part_name} at byte {position}: {message}"
             ),
+            Self::Image { part_name, message } => {
+                write!(formatter, "invalid DOCX image {part_name}: {message}")
+            }
             Self::LimitExceeded {
                 resource,
                 limit,
@@ -79,7 +86,10 @@ impl Error for DocxError {
         match self {
             Self::Io(error) => Some(error),
             Self::Zip(error) => Some(error),
-            Self::Xml { .. } | Self::LimitExceeded { .. } | Self::Rejected { .. } => None,
+            Self::Xml { .. }
+            | Self::Image { .. }
+            | Self::LimitExceeded { .. }
+            | Self::Rejected { .. } => None,
         }
     }
 }

@@ -1104,11 +1104,20 @@ fn validate_duplicate_candidate(
 }
 
 pub(crate) fn normalized_source_file_name(value: &str) -> CommandResult<String> {
-    let normalized = value.trim().nfkc().collect::<String>();
+    // A source filename is display metadata, not a filesystem path. NFC keeps
+    // valid full-width punctuation such as the Chinese colon instead of
+    // folding it into a Windows-reserved ASCII path character.
+    let normalized = value.trim().nfc().collect::<String>();
     let normalized = normalized.trim().to_owned();
-    if normalized.is_empty()
-        || exceeds_char_limit(&normalized, MAX_SOURCE_FILE_NAME_CHARS)
-        || normalized.chars().any(char::is_control)
+    if normalized.is_empty() {
+        return Err(CommandError::validation("批量导入来源文件名不能为空。"));
+    }
+    if exceeds_char_limit(&normalized, MAX_SOURCE_FILE_NAME_CHARS) {
+        return Err(CommandError::validation(
+            "批量导入来源文件名不能超过 255 个字符。",
+        ));
+    }
+    if normalized.chars().any(char::is_control)
         || normalized.contains('/')
         || normalized.contains('\\')
         || normalized.contains(':')
@@ -1119,7 +1128,7 @@ pub(crate) fn normalized_source_file_name(value: &str) -> CommandResult<String> 
             != Some(normalized.as_str())
     {
         return Err(CommandError::validation(
-            "批量导入来源文件名无效；只能保存不含路径且不超过 255 个字符的文件名。",
+            "批量导入来源文件名无效；只能保存不含路径和非法字符的文件名。",
         ));
     }
     let lowercase = normalized.to_ascii_lowercase();
@@ -1962,14 +1971,18 @@ mod tests {
     #[test]
     fn batch_import_metadata_accepts_safe_docx_and_xlsx_names_without_paths() {
         let mut payload = word_import_payload();
-        payload.source_file_name = "  Ｌｅｓｓｏｎ．ｄｏｃｘ  ".to_owned();
+        payload.source_file_name =
+            "  精品解析：2026年江苏无锡市中考物理试题（原卷版）(1).docx  ".to_owned();
         payload.parser_version = "  ｗ１-v1  ".to_owned();
         let normalized = normalized_word_import_payload(&payload).unwrap();
-        assert_eq!(normalized.source_file_name, "Lesson.docx");
+        assert_eq!(
+            normalized.source_file_name,
+            "精品解析：2026年江苏无锡市中考物理试题（原卷版）(1).docx"
+        );
         assert_eq!(normalized.parser_version, "w1-v1");
         validate_word_import_payload(&normalized).unwrap();
 
-        payload.source_file_name = "  题库．ＸＬＳＸ  ".to_owned();
+        payload.source_file_name = "  题库.XLSX  ".to_owned();
         let normalized = normalized_word_import_payload(&payload).unwrap();
         assert_eq!(normalized.source_file_name, "题库.XLSX");
         validate_word_import_payload(&normalized).unwrap();

@@ -21,6 +21,7 @@ mod template;
 mod template_config;
 mod template_package;
 mod types;
+mod wmf;
 mod xml;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};

@@ -26,13 +26,13 @@ function dateInputValue(date: Date) {
 }
 
 function defaultSettings(): MiniProgramSettings {
-  const start = new Date()
-  start.setDate(1)
-  const end = new Date(start.getFullYear(), start.getMonth() + 1, 0)
   return {
-    quota: 50,
-    serviceStarts: dateInputValue(start),
-    serviceEnds: dateInputValue(end),
+    quota: 1,
+    freeQuota: 1,
+    paidQuota: 0,
+    paidStatus: 'none',
+    serviceStarts: dateInputValue(new Date()),
+    serviceEnds: '9999-12-31',
     paused: false,
   }
 }
@@ -93,6 +93,11 @@ function normalizeState(input: unknown): PersistedMiniProgramState {
       serviceStarts: typeof settings.serviceStarts === 'string' ? settings.serviceStarts : fallback.settings.serviceStarts,
       serviceEnds: typeof settings.serviceEnds === 'string' ? settings.serviceEnds : fallback.settings.serviceEnds,
       paused: settings.paused === true,
+      freeQuota: settings.freeQuota === 1 ? 1 : settings.quota === undefined ? fallback.settings.freeQuota : undefined,
+      paidQuota: typeof settings.paidQuota === 'number' ? settings.paidQuota : fallback.settings.paidQuota,
+      paidStatus: settings.paidStatus ?? fallback.settings.paidStatus,
+      paidServiceStarts: settings.paidServiceStarts ?? null,
+      paidServiceEnds: settings.paidServiceEnds ?? null,
     },
     publications: clone(publications),
     invites: clone(invites),
@@ -232,6 +237,9 @@ export const useMiniProgramStore = defineStore('miniProgram', () => {
     const account = member.account.trim().toLocaleLowerCase('zh-CN')
     if (!countedAccounts.value.has(account) && usedQuota.value >= settings.value.quota) {
       throw new Error('本周期授权名额已用完，请联系管理员确认授权。')
+    }
+    if (settings.value.freeQuota === 1 && !member.seatType) {
+      member.seatType = usedQuota.value === 0 ? 'free' : 'paid'
     }
     member.status = 'active'
     member.joinedAt = Date.now()

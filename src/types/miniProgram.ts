@@ -5,6 +5,11 @@ export interface MiniProgramSettings {
   serviceStarts: string
   serviceEnds: string
   paused: boolean
+  freeQuota?: number
+  paidQuota?: number
+  paidStatus?: 'none' | 'active' | 'paused' | 'scheduled' | 'expired'
+  paidServiceStarts?: string | null
+  paidServiceEnds?: string | null
 }
 
 export interface MiniProgramPublication {
@@ -37,4 +42,5 @@ export interface MiniProgramMember {
   joinedAt: number | null
   stoppedAt: number | null
   reason: string | null
+  seatType?: 'free' | 'paid' | null
 }

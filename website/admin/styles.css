@@ -81,7 +81,7 @@ strong { font-weight: 500; }
 .row-actions button { white-space: nowrap; }
 .status { font-size: 12px; white-space: nowrap; }
 .status::before { content: ''; display: inline-block; width: 5px; height: 5px; background: currentColor; border-radius: 50%; vertical-align: middle; margin-right: 6px; }
-.status.active { color: var(--success); }
+.status.active, .status.free { color: var(--success); }
 .status.expired, .status.disabled { color: var(--danger); }
 .status.paused { color: var(--warning); }
 .status.scheduled { color: var(--accent); }

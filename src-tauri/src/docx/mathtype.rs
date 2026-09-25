@@ -906,17 +906,36 @@ impl<'a> MtefParser<'a> {
         loop {
             let record_type = self.read_u8()?;
             self.records += 1;
+            if self.records > MAX_MTEF_RECORDS {
+                return Err(invalid_mathtype(format!(
+                    "MathType structure exceeds the record limit of {MAX_MTEF_RECORDS}"
+                )));
+            }
             if record_type == 0 {
                 break;
             }
-            if record_type != 6 {
-                return Err(invalid_mathtype(format!(
-                    "unexpected record {record_type} in MathType embellishment list"
-                )));
+            if record_type == 6 {
+                let options = self.read_u8()?;
+                self.skip_nudge(options)?;
+                result.push(self.read_u8()?);
+                continue;
             }
-            let options = self.read_u8()?;
-            self.skip_nudge(options)?;
-            result.push(self.read_u8()?);
+            // Some MathType producers insert formatting and definition records
+            // between a character and its EMBELL records. They affect display
+            // state only, so consume them with the same bounded parser used by
+            // the surrounding object list while retaining the embellishments.
+            if matches!(record_type, 7..=19 | 100..=u8::MAX) {
+                if self.parse_record(record_type, depth + 1)?.is_some() {
+                    return Err(invalid_mathtype(
+                        "structural record occurred inside a MathType embellishment list",
+                    ));
+                }
+                continue;
+            }
+            return Err(invalid_mathtype(format!(
+                "unexpected record {record_type} at byte {} in MathType embellishment list",
+                self.position.saturating_sub(1)
+            )));
         }
         Ok(result)
     }
@@ -1421,6 +1440,7 @@ fn mt_code_to_latex(code: u16) -> Option<String> {
         0x2026 => r"\ldots ".to_owned(),
         0x2032 => "'".to_owned(),
         0x2033 => "''".to_owned(),
+        0x2103 => r"^{\circ}\mathrm{C}".to_owned(),
         0x2190 => r"\leftarrow ".to_owned(),
         0x2192 => r"\rightarrow ".to_owned(),
         0x2194 => r"\leftrightarrow ".to_owned(),
@@ -1448,6 +1468,7 @@ fn mt_code_to_latex(code: u16) -> Option<String> {
         0x2234 => r"\therefore ".to_owned(),
         0x2235 => r"\because ".to_owned(),
         0x223c => r"\sim ".to_owned(),
+        0x2236 => r"\mathbin{:}".to_owned(),
         0x2248 => r"\approx ".to_owned(),
         0x2260 => r"\ne ".to_owned(),
         0x2261 => r"\equiv ".to_owned(),
@@ -1459,6 +1480,20 @@ fn mt_code_to_latex(code: u16) -> Option<String> {
         0x2287 => r"\supseteq ".to_owned(),
         0x2295 => r"\oplus ".to_owned(),
         0x22a5 => r"\perp ".to_owned(),
+        // MTCode uses the Unicode private-use range for non-marking
+        // spacing characters. They must be translated before handing the
+        // formula to KaTeX; emitting the raw private-use character makes the
+        // entire formula fail to render. EF0A is emitted by WPS-produced
+        // MathType objects for the same visual separation between a value
+        // and its physical unit.
+        0xef01 => String::new(),
+        0xef02 => r"\,".to_owned(),
+        0xef03 => r"\;".to_owned(),
+        0xef04 => r"\ ".to_owned(),
+        0xef05 => r"\quad ".to_owned(),
+        0xef06 => r"\qquad ".to_owned(),
+        0xef0a => r"\,".to_owned(),
+        0xef22 => r"\!".to_owned(),
         _ => {
             let character = char::from_u32(u32::from(code))?;
             if character.is_control() {
@@ -1514,6 +1549,51 @@ mod tests {
         let converted = convert_mtef_to_latex(&bytes).expect("MTEF should parse");
         assert_eq!(converted.latex, "x+1");
         assert!(converted.unsupported_features.is_empty());
+    }
+
+    #[test]
+    fn renders_embellishment_when_a_color_record_precedes_it() {
+        let bytes = [
+            5,
+            1,
+            0,
+            7,
+            0,
+            b'T',
+            0,
+            1, // header
+            1,
+            0, // line
+            2,
+            OPT_CHAR_EMBELL,
+            0x83,
+            b'm',
+            0, // m with an embellishment list
+            15,
+            0, // reset the color before rendering the embellishment
+            6,
+            0,
+            5, // single-prime embellishment
+            0, // embellishment-list end
+            0, // line end
+            0, // equation end
+        ];
+        let converted = convert_mtef_to_latex(&bytes).expect("MTEF should parse");
+        assert_eq!(converted.latex, "m'");
+        assert!(converted.unsupported_features.is_empty());
+    }
+
+    #[test]
+    fn converts_mathtype_spacing_and_common_physics_symbols_to_katex_latex() {
+        assert_eq!(mt_code_to_latex(0xef01).as_deref(), Some(""));
+        assert_eq!(mt_code_to_latex(0xef02).as_deref(), Some(r"\,"));
+        assert_eq!(mt_code_to_latex(0xef04).as_deref(), Some(r"\ "));
+        assert_eq!(mt_code_to_latex(0xef0a).as_deref(), Some(r"\,"));
+        assert_eq!(
+            mt_code_to_latex(0x2103).as_deref(),
+            Some(r"^{\circ}\mathrm{C}")
+        );
+        assert_eq!(mt_code_to_latex(0x2236).as_deref(), Some(r"\mathbin{:}"));
     }
 
     #[test]

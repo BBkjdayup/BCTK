@@ -8,6 +8,18 @@ describe('mini-program management quota', () => {
     setActivePinia(createPinia())
   })
 
+  it('starts a new local preview with one permanent free seat', () => {
+    const store = useMiniProgramStore()
+    expect(store.settings.quota).toBe(1)
+    expect(store.settings.freeQuota).toBe(1)
+    expect(store.settings.serviceEnds).toBe('9999-12-31')
+    const invite = store.createInvite({ label: '免费试用', validDays: 30 })
+    const member = store.addMember({ name: '学员', account: 'free-student', inviteId: invite.id })
+    expect(store.approveMember(member.id)).toBe(true)
+    expect(store.members.find(item => item.id === member.id)?.seatType).toBe('free')
+    expect(store.remainingQuota).toBe(0)
+  })
+
   it('retains records from former subject groups and reloads new records without a subject', () => {
     const now = Date.now()
     const invites = ['subject-1', 'subject-2'].map((subjectId, index) => ({
@@ -20,7 +32,7 @@ describe('mini-program management quota', () => {
       status: index === 0 ? 'active' : 'stopped', requestedAt: now, joinedAt: now,
       stoppedAt: index === 0 ? null : now, reason: null,
     }))
-    localStorage.setItem('tkup-mini-program-management-v1', JSON.stringify({ invites, members }))
+    localStorage.setItem('tkup-mini-program-management-v1', JSON.stringify({ settings: { quota: 2 }, invites, members }))
 
     const store = useMiniProgramStore()
     expect(store.invites).toEqual(invites)

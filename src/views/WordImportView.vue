@@ -11,6 +11,7 @@ import RichTextEditor from '../components/RichTextEditor.vue'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { backend, isDesktopRuntime } from '../services/backend'
 import { errorMessage } from '../services/errors'
+import { explainImportError } from '../utils/importError'
 import { useAppStore } from '../stores/app'
 import { useQuestionBankStore } from '../stores/questionBank'
 import {
@@ -40,6 +41,7 @@ import { clonePlain } from '../utils/clonePlain'
 import { chunked, withTimeout } from '../utils/boundedBatch'
 import {
   applyWordImportBatchClassification,
+  applyWordImportBatchTags,
   canOpenWordImportDuplicateDialog,
   pendingWordImportItems,
   planWordImportOverwrites,
@@ -157,6 +159,8 @@ const progress = ref(0)
 const parseLogs = ref<string[]>([])
 const analysis = ref<DocxAnalysis | null>(null)
 const recognitionError = ref('')
+const recognitionErrorAdvice = ref('')
+const recognitionErrorDetail = ref('')
 const items = ref<ImportItem[]>([])
 const activeItemId = ref<string | null>(null)
 const saving = ref(false)
@@ -179,6 +183,8 @@ const result = ref({ success: 0, failed: 0, skipped: 0 })
 const sessionTotalCount = ref(0)
 const batchSubjectId = ref('')
 const batchChapterId = ref('')
+const batchTagIds = ref<string[]>([])
+const creatingBatchTag = ref(false)
 const contextMenuOpen = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
@@ -200,7 +206,7 @@ const importSessionId = ref<string | null>(null)
 const pendingImageOccurrences = ref<DocxImageOccurrence[]>([])
 const pendingFormulaOccurrences = ref<DocxFormulaOccurrence[]>([])
 const pendingTableOccurrences = ref<DocxTableOccurrence[]>([])
-const CURRENT_WORD_IMPORT_PARSER_VERSION = 'w1-ooxml-images-formulas-tables-7'
+const CURRENT_WORD_IMPORT_PARSER_VERSION = 'w1-ooxml-images-formulas-tables-8'
 const CURRENT_EXCEL_IMPORT_PARSER_VERSION = 'xlsx-text-v2'
 const parserVersion = ref(CURRENT_WORD_IMPORT_PARSER_VERSION)
 const desktopAvailable = isDesktopRuntime()
@@ -386,6 +392,60 @@ function applyBatchClassification() {
   ElMessage.success(`已将 ${updated.length} 道题设置为“${subject.name} / ${chapter.name}”，可直接导入本批。`)
 }
 
+function applyBatchTagAction(action: 'add' | 'remove') {
+  if (!selectedCount.value) {
+    ElMessage.warning('请先勾选需要设置标签的题目。')
+    return
+  }
+  const validIds = batchTagIds.value.filter((id) => appStore.tags.some((tag) => tag.id === id))
+  if (!validIds.length) {
+    ElMessage.warning('请先选择标签。')
+    return
+  }
+  const updated = applyWordImportBatchTags(items.value, validIds, action)
+  if (!updated.length) {
+    ElMessage.info(action === 'add' ? '所选题目已经有这些标签。' : '所选题目没有这些标签。')
+    return
+  }
+  draftDirty.value = true
+  ElMessage.success(`已为 ${updated.length} 道题${action === 'add' ? '添加' : '移除'}标签。`)
+}
+
+async function createBatchTag() {
+  let name: string
+  try {
+    const result = await ElMessageBox.prompt('新标签创建后会自动选中，请再点击“添加到已选”。', '新建标签', {
+      inputPlaceholder: '请输入标签名称',
+      confirmButtonText: '创建',
+      cancelButtonText: '取消',
+      inputValidator: (value: string) => {
+        const normalized = value.trim().normalize('NFKC').trim()
+        if (!normalized) return '标签名称不能为空'
+        return [...normalized].length <= 50 || '标签名称不能超过 50 个字符'
+      },
+    })
+    name = result.value.trim().normalize('NFKC').trim()
+  } catch {
+    return
+  }
+  const existing = appStore.tags.find((tag) => tag.name.normalize('NFKC').toLocaleLowerCase('zh-CN') === name.toLocaleLowerCase('zh-CN'))
+  if (existing) {
+    batchTagIds.value = [...new Set([...batchTagIds.value, existing.id])]
+    ElMessage.info('同名标签已选中。')
+    return
+  }
+  creatingBatchTag.value = true
+  try {
+    const id = await appStore.createTag(name)
+    batchTagIds.value = [...new Set([...batchTagIds.value, id])]
+    ElMessage.success(`已创建标签“${name}”，点击“添加到已选”即可批量使用。`)
+  } catch (reason) {
+    ElMessage.error(errorMessage(reason, '新建标签失败'))
+  } finally {
+    creatingBatchTag.value = false
+  }
+}
+
 function openItemContextMenu(event: MouseEvent, item: ImportItem) {
   event.preventDefault()
   activateReviewItem(item)
@@ -464,6 +524,29 @@ function validateFile(name: string, size: number, kind: 'docx' | 'xlsx') {
   return true
 }
 
+function clearRecognitionError() {
+  recognitionError.value = ''
+  recognitionErrorAdvice.value = ''
+  recognitionErrorDetail.value = ''
+}
+
+function showRecognitionError(reason: unknown, kind: 'docx' | 'xlsx') {
+  const explanation = explainImportError(reason, kind)
+  recognitionError.value = explanation.title
+  recognitionErrorAdvice.value = explanation.action
+  recognitionErrorDetail.value = explanation.detail
+  parseLogs.value.push(`错误：${explanation.title}`)
+}
+
+async function copyRecognitionErrorDetails() {
+  try {
+    await navigator.clipboard.writeText(recognitionErrorDetail.value)
+    ElMessage.success('错误详情已复制')
+  } catch {
+    ElMessage.error('复制失败，请展开“查看错误详情”后手动复制。')
+  }
+}
+
 function onDrop(event: DragEvent) {
   dragActive.value = false
   if (!desktopAvailable) {
@@ -505,7 +588,8 @@ async function chooseNativeFile(kind: 'docx' | 'xlsx') {
       selectedFile.value = { name, size: 0, path, kind }
     }
   } catch (reason) {
-    ElMessage.error(errorMessage(reason, `无法读取${kind === 'xlsx' ? ' Excel' : ' Word'}文件`))
+    const explanation = explainImportError(reason, kind)
+    ElMessage.error(`${explanation.title}。${explanation.action}`)
   } finally {
     excelInspectionRunning.value = false
   }
@@ -561,7 +645,7 @@ async function startDesktopRecognition(path: string) {
   clearTimeout(prepareReviewTimer)
   step.value = 1
   progress.value = 6
-  recognitionError.value = ''
+  clearRecognitionError()
   analysis.value = null
   pendingImageOccurrences.value = []
   pendingFormulaOccurrences.value = []
@@ -602,19 +686,30 @@ async function startDesktopRecognition(path: string) {
     }
     if (started.tables.length) parseLogs.value.push(`已保留 ${started.tables.length} 个可编辑 Word 表格`)
     for (const diagnostic of result.diagnostics.slice(0, 6)) {
-      parseLogs.value.push(`${diagnostic.severity === 'error' ? '错误' : '提示'}：${diagnostic.message}`)
+      if (diagnostic.severity !== 'error') parseLogs.value.push(`提示：${diagnostic.message}`)
     }
     if (!result.isValid) {
-      recognitionError.value = result.diagnostics.find((item) => item.severity === 'error')?.message
-        ?? '这个文件未通过 DOCX 安全和结构检查，未读取题目内容。'
+      const error = result.diagnostics.find((item) => item.severity === 'error')
+      showRecognitionError(error ?? {
+        code: 'DOCX_IMPORT_ANALYSIS_REJECTED',
+        message: '这个文件未通过 DOCX 安全和结构检查，未读取题目内容。',
+      }, 'docx')
       return
     }
     parseLogs.value.push('文档读取完成，正在生成可人工审查的题目草稿')
-    prepareReviewTimer = setTimeout(() => prepareReview(result, request), 250)
+    prepareReviewTimer = setTimeout(() => {
+      try {
+        prepareReview(result, request)
+      } catch (reason) {
+        if (!componentActive || request !== recognitionRequest) return
+        step.value = 1
+        draftReady.value = false
+        showRecognitionError(reason, 'docx')
+      }
+    }, 250)
   } catch (reason) {
     if (!componentActive || request !== recognitionRequest || step.value !== 1) return
-    recognitionError.value = errorMessage(reason, 'Word 文档分析或图片资源登记失败')
-    parseLogs.value.push(`错误：${recognitionError.value}`)
+    showRecognitionError(reason, 'docx')
   } finally {
     clearInterval(progressTimer)
     if (timer === progressTimer) timer = undefined
@@ -864,7 +959,7 @@ async function startExcelRecognition(path: string) {
   clearTimeout(prepareReviewTimer)
   step.value = 1
   progress.value = 6
-  recognitionError.value = ''
+  clearRecognitionError()
   analysis.value = null
   pendingImageOccurrences.value = []
   pendingFormulaOccurrences.value = []
@@ -894,11 +989,19 @@ async function startExcelRecognition(path: string) {
     parseLogs.value.push(`识别到 ${started.analysis.sourceItemCount} 行题目数据`)
     for (const warning of started.analysis.warnings) parseLogs.value.push(`提示：${warning}`)
     parseLogs.value.push('Excel 读取完成，正在生成可人工审查的题目草稿')
-    prepareReviewTimer = setTimeout(() => prepareExcelReview(started.analysis, request), 180)
+    prepareReviewTimer = setTimeout(() => {
+      try {
+        prepareExcelReview(started.analysis, request)
+      } catch (reason) {
+        if (!componentActive || request !== recognitionRequest) return
+        step.value = 1
+        draftReady.value = false
+        showRecognitionError(reason, 'xlsx')
+      }
+    }, 180)
   } catch (reason) {
     if (!componentActive || request !== recognitionRequest || step.value !== 1) return
-    recognitionError.value = errorMessage(reason, 'Excel 题库分析失败')
-    parseLogs.value.push(`错误：${recognitionError.value}`)
+    showRecognitionError(reason, 'xlsx')
   } finally {
     clearInterval(progressTimer)
     if (timer === progressTimer) timer = undefined
@@ -1168,7 +1271,7 @@ function buildWordImportDraftPayload(): WordImportDraftPayload {
     : items.value[0]?.id ?? null
   return {
     schemaVersion: 1,
-    sourceFileName: selectedFile.value.name.normalize('NFKC').trim(),
+    sourceFileName: selectedFile.value.name.normalize('NFC').trim(),
     sourceFileSize: Math.max(0, Math.trunc(selectedFile.value.size)),
     parserVersion: parserVersion.value,
     importSessionId: importSessionId.value,
@@ -1306,7 +1409,7 @@ function restoreWordImportDraft(saved: WordImportDraftRecord) {
   pendingFormulaOccurrences.value = []
   pendingTableOccurrences.value = []
   analysis.value = null
-  recognitionError.value = ''
+  clearRecognitionError()
   progress.value = 100
   parseLogs.value = []
   duplicateActionRules.clear()
@@ -2494,7 +2597,7 @@ function resetState() {
   progress.value = 0
   parseLogs.value = []
   analysis.value = null
-  recognitionError.value = ''
+  clearRecognitionError()
   importLimitNotice.value = ''
   sourceRecognizedItemCount.value = 0
   omittedItemCount.value = 0
@@ -2509,6 +2612,7 @@ function resetState() {
   sessionTotalCount.value = 0
   batchSubjectId.value = ''
   batchChapterId.value = ''
+  batchTagIds.value = []
   failedImportItemIds.clear()
   overwriteOperationIds.clear()
   importExecutionPhase.value = 'idle'
@@ -2650,9 +2754,16 @@ async function reset() {
         <p>正在本地解析{{ sourceFormatLabel }}文件，不会上传任何内容。</p>
         <el-progress :percentage="progress" :stroke-width="9" />
         <div v-if="recognitionError" class="warning-banner recognition-error">
-          <strong>文件未通过检查</strong>
-          <span>{{ recognitionError }}</span>
-          <el-button size="small" @click="reset">重新选择文件</el-button>
+          <strong>{{ recognitionError }}</strong>
+          <span>{{ recognitionErrorAdvice }}</span>
+          <details v-if="recognitionErrorDetail" class="recognition-error-details">
+            <summary>查看错误详情</summary>
+            <code>{{ recognitionErrorDetail }}</code>
+          </details>
+          <div class="recognition-error-actions">
+            <el-button size="small" @click="copyRecognitionErrorDetails">复制错误详情</el-button>
+            <el-button size="small" @click="reset">重新选择文件</el-button>
+          </div>
         </div>
         <div class="parse-log">
           <div v-for="line in parseLogs" :key="line"><span class="status-dot" />{{ line }}</div>
@@ -2713,6 +2824,27 @@ async function reset() {
               :disabled="selectedCount === 0 || !batchSubjectId || !batchChapterId"
               @click="applyBatchClassification"
             >应用到已选 {{ selectedCount }} 题</el-button>
+          </div>
+          <div class="batch-tags">
+            <div class="batch-tags__heading">
+              <strong>批量标签</strong>
+              <el-button text size="small" :loading="creatingBatchTag" @click="createBatchTag">新建标签</el-button>
+            </div>
+            <el-select
+              v-model="batchTagIds"
+              size="small"
+              multiple
+              filterable
+              collapse-tags
+              clearable
+              placeholder="选择一个或多个标签"
+            >
+              <el-option v-for="tag in appStore.tags" :key="tag.id" :label="tag.name" :value="tag.id" />
+            </el-select>
+            <div class="batch-tags__actions">
+              <el-button size="small" :disabled="selectedCount === 0 || !batchTagIds.length" @click="applyBatchTagAction('add')">添加到已选</el-button>
+              <el-button size="small" :disabled="selectedCount === 0 || !batchTagIds.length" @click="applyBatchTagAction('remove')">从已选移除</el-button>
+            </div>
           </div>
           <div v-if="importLimitNotice" class="warning-banner import-limit-notice">{{ importLimitNotice }}</div>
           <button
@@ -3214,6 +3346,29 @@ async function reset() {
   line-height: 1.6;
 }
 
+.recognition-error-details {
+  width: min(100%, 620px);
+  text-align: left;
+}
+
+.recognition-error-details summary {
+  cursor: pointer;
+}
+
+.recognition-error-details code {
+  display: block;
+  margin-top: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.recognition-error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+}
+
 .parse-log div {
   display: flex;
   align-items: center;
@@ -3281,7 +3436,8 @@ async function reset() {
   line-height: 1.35;
 }
 
-.batch-classification {
+.batch-classification,
+.batch-tags {
   margin: 10px 8px 8px;
   padding: 10px;
   display: grid;
@@ -3316,6 +3472,29 @@ async function reset() {
 
 .batch-classification__apply {
   width: 100%;
+}
+
+.batch-tags__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: #334155;
+  font-size: 11px;
+}
+
+.batch-tags > :deep(.el-select) {
+  width: 100%;
+}
+
+.batch-tags__actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 7px;
+}
+
+.batch-tags__actions .el-button {
+  width: 100%;
+  margin: 0;
 }
 
 .import-limit-notice {

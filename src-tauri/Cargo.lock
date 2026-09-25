@@ -6447,13 +6447,14 @@ dependencies = [
 
 [[package]]
 name = "zhitiku-desktop"
-version = "0.1.88"
+version = "0.1.94"
 dependencies = [
  "base64 0.22.1",
  "calamine",
  "cfb 0.14.0",
  "ego-tree",
  "minisign-verify",
+ "png 0.17.16",
  "quick-xml",
  "reqwest 0.12.28",
  "scraper",
@@ -6473,6 +6474,7 @@ dependencies = [
  "uuid",
  "webview2-com",
  "windows-core 0.61.2",
+ "windows-sys 0.61.2",
  "zip 8.6.0",
 ]
 

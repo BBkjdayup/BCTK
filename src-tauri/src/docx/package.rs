@@ -566,10 +566,18 @@ pub(crate) fn scan_relationships(
                             .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
                 }
 
-                if target_mode
+                let is_external = target_mode
                     .as_deref()
-                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"))
+                    .is_some_and(|mode| mode.eq_ignore_ascii_case("external"));
+                if is_external
+                    && is_ignored_header_footer_external_image(part_name, &lower_type, limits)
                 {
+                    diagnostics.push(Diagnostic::warning(
+                        "DOCX_HEADER_FOOTER_EXTERNAL_IMAGE_IGNORED",
+                        Some(part_name),
+                        "页眉或页脚中的外部图片不属于题目内容，导入时已忽略。",
+                    ));
+                } else if is_external {
                     diagnostics.push(Diagnostic::error(
                         "DOCX_EXTERNAL_RELATIONSHIP",
                         Some(part_name),
@@ -609,6 +617,31 @@ pub(crate) fn scan_relationships(
         ));
     }
     Ok(())
+}
+
+fn is_ignored_header_footer_external_image(
+    part_name: &str,
+    relationship_type: &str,
+    limits: &DocxLimits,
+) -> bool {
+    if !limits.allow_ignored_header_footer_external_images || !relationship_type.ends_with("/image")
+    {
+        return false;
+    }
+    let lower = part_name.to_ascii_lowercase();
+    let Some(file_name) = lower.strip_prefix("word/_rels/") else {
+        return false;
+    };
+    let Some(stem) = file_name.strip_suffix(".xml.rels") else {
+        return false;
+    };
+    let Some(number) = stem
+        .strip_prefix("header")
+        .or_else(|| stem.strip_prefix("footer"))
+    else {
+        return false;
+    };
+    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn scan_document_security(
@@ -786,5 +819,46 @@ mod tests {
                 .iter()
                 .any(|item| item.code == "DOCX_ACTIVE_CONTENT_PART")
         );
+    }
+
+    #[test]
+    fn question_import_ignores_only_header_footer_external_images() {
+        const EXTERNAL_IMAGE: &[u8] = br#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="file:///D:/missing/header.png" TargetMode="External"/>
+</Relationships>"#;
+        let limits = DocxLimits {
+            allow_ignored_header_footer_external_images: true,
+            ..DocxLimits::default()
+        };
+        let mut diagnostics = Vec::new();
+        scan_relationships(
+            EXTERNAL_IMAGE,
+            "word/_rels/header1.xml.rels",
+            &limits,
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(diagnostics.iter().any(|item| {
+            item.code == "DOCX_HEADER_FOOTER_EXTERNAL_IMAGE_IGNORED"
+                && item.severity == DiagnosticSeverity::Warning
+        }));
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|item| item.severity == DiagnosticSeverity::Error)
+        );
+
+        diagnostics.clear();
+        scan_relationships(
+            EXTERNAL_IMAGE,
+            "word/_rels/document.xml.rels",
+            &limits,
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert!(diagnostics.iter().any(|item| {
+            item.code == "DOCX_EXTERNAL_RELATIONSHIP" && item.severity == DiagnosticSeverity::Error
+        }));
     }
 }

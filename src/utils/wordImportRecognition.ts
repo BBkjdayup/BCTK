@@ -74,13 +74,102 @@ interface PendingAnswer {
   acceptingAnswer: boolean
 }
 
+type InlineQuestionField = 'answer' | 'explanation'
+
+interface InlineQuestionFieldMarker {
+  field: InlineQuestionField
+  content: string
+  prefix: string
+}
+
 const answerHeadingPattern = /^\s*(?:参考答案(?:与|及)评分要点|参考答案及解析|试题参考答案|参考答案与解析|参考答案)\s*[：:]?\s*$/
 const explanationHeadingPattern = /^\s*(?:题目解析|试题解析|答案解析|解析)\s*[：:]?\s*$/
-const answerContentPattern = /^\s*(?:参考要点|参考答案|答案|评分要点|答)\s*[：:]\s*(.*)$/
-const explanationContentPattern = /^\s*(?:题目解析|答案解析|解析)\s*[：:]\s*(.*)$/
+const wrappedFieldPattern = /^\s*[【\[［〖〔（(]\s*([^】\]］〗〕）)]{1,24})\s*[】\]］〗〕）)]\s*[：:]?\s*(.*)$/u
+const answerFieldPattern = /^\s*(参考要点|参考答案|正确答案|标准答案|答案|评分要点|答)\s*[：:]\s*(.*)$/u
+const explanationFieldPattern = /^\s*(题目解析|试题解析|答案解析|解析|详解|分析|解答|解题过程|解题思路|思路点拨|点拨|点评|点睛|考点(?:定位)?|知识点|方法技巧)\s*[：:]\s*(.*)$/u
+const answerFieldLabels = new Set([
+  '参考要点',
+  '参考答案',
+  '正确答案',
+  '标准答案',
+  '答案',
+  '评分要点',
+  '答',
+])
+const explanationFieldLabels = new Set([
+  '题目解析',
+  '试题解析',
+  '答案解析',
+  '解析',
+  '详解',
+  '分析',
+  '解答',
+  '解题过程',
+  '解题思路',
+  '思路点拨',
+  '点拨',
+  '点评',
+  '点睛',
+  '考点',
+  '考点定位',
+  '知识点',
+  '方法技巧',
+])
+const retainedExplanationLabels = new Set([
+  '思路点拨',
+  '点拨',
+  '点评',
+  '点睛',
+  '考点',
+  '考点定位',
+  '知识点',
+  '方法技巧',
+])
 const optionMarkerPattern = /([A-HＡ-Ｈ])\s*[.．、:：)）]\s*/gi
 const instructionPattern = /^\s*(?:说明|注意(?:事项)?|答题要求|本大题|每题|考点覆盖|正式组卷时)\s*[：:]/
 const emptyExportFieldPattern = /^\(\s*未填写\s*\)[。.．]?$/u
+
+function normalizedFieldLabel(value: string) {
+  return value.normalize('NFKC').replace(/\s+/gu, '')
+}
+
+function explanationPrefix(label: string) {
+  const subquestion = label.match(/^(?:(?:小问|小题)([0-9一二三四五六七八九十]+)|第([0-9一二三四五六七八九十]+)(?:小问|小题))(?:详解|解析|分析|解答)$/u)
+  const subquestionNumber = subquestion?.[1] ?? subquestion?.[2]
+  if (subquestionNumber) return `小问${subquestionNumber}：`
+  return retainedExplanationLabels.has(label) ? `${label}：` : ''
+}
+
+function parseInlineQuestionField(text: string): InlineQuestionFieldMarker | null {
+  const wrapped = text.match(wrappedFieldPattern)
+  if (wrapped?.[1] !== undefined) {
+    const label = normalizedFieldLabel(wrapped[1])
+    const content = (wrapped[2] ?? '').trim()
+    if (answerFieldLabels.has(label)) return { field: 'answer', content, prefix: '' }
+    if (explanationFieldLabels.has(label)) {
+      return { field: 'explanation', content, prefix: explanationPrefix(label) }
+    }
+    if (/^(?:(?:小问|小题)[0-9一二三四五六七八九十]+|第[0-9一二三四五六七八九十]+(?:小问|小题))(?:详解|解析|分析|解答)$/u.test(label)) {
+      return { field: 'explanation', content, prefix: explanationPrefix(label) }
+    }
+  }
+
+  const answer = text.match(answerFieldPattern)
+  if (answer) return { field: 'answer', content: (answer[2] ?? '').trim(), prefix: '' }
+  const explanation = text.match(explanationFieldPattern)
+  if (!explanation) return null
+  const label = normalizedFieldLabel(explanation[1] ?? '')
+  return {
+    field: 'explanation',
+    content: (explanation[2] ?? '').trim(),
+    prefix: explanationPrefix(label),
+  }
+}
+
+function inlineFieldText(marker: InlineQuestionFieldMarker) {
+  if (!marker.prefix) return marker.content
+  return marker.content ? `${marker.prefix}${marker.content}` : marker.prefix
+}
 
 function cloneLine(line: WordAnalysisLine, text = line.text, images = line.images): WordAnalysisLine {
   return { ...line, text, images: [...images] }
@@ -306,8 +395,14 @@ function optionMarkers(text: string): OptionMarker[] {
   while (match) {
     const markerStart = match.index
     const previous = markerStart > 0 ? text[markerStart - 1] ?? '' : ''
-    const atBoundary = markerStart === 0 || !/[A-Za-z0-9]/.test(previous)
-    if (atBoundary) {
+    // A、B in a sentence, (a/b) and °C) are content, not option labels.
+    // Inline options are separated from the stem or each other by whitespace.
+    const previousMarker = matches[matches.length - 1]
+    const adjacentEmptyOption = previousMarker?.contentStart === markerStart
+    const atBoundary = markerStart === 0 || /\s/u.test(previous) || adjacentEmptyOption
+    const nextText = text.slice(optionMarkerPattern.lastIndex)
+    const pointList = match[0].includes('、') && /^[A-H]/iu.test(nextText)
+    if (atBoundary && !pointList) {
       matches.push({
         label: normalizedLetter(match[1] ?? ''),
         markerStart,
@@ -461,16 +556,17 @@ function parseAnswers(lines: readonly WordAnalysisLine[], questions: readonly Ra
         answerLines: [],
         acceptingAnswer: false,
       }
-      const inlineAnswer = numbered.remainder.match(answerContentPattern)
-      if (inlineAnswer) {
+      const inlineField = parseInlineQuestionField(numbered.remainder)
+      if (inlineField?.field === 'answer') {
         pending.acceptingAnswer = true
-        if ((inlineAnswer[1] ?? '').trim() || line.images.length) {
-          pending.answerLines.push(cloneLine(line, (inlineAnswer[1] ?? '').trim()))
+        const content = inlineFieldText(inlineField)
+        if (content || line.images.length || line.tables?.length) {
+          pending.answerLines.push(cloneLine(line, content))
         }
-      } else if (
+      } else if (!inlineField && (
         (numbered.remainder || line.images.length)
         && !isRepeatedQuestionStem(questions, resolvedSection, numbered.number, numbered.remainder)
-      ) {
+      )) {
         pending.acceptingAnswer = true
         pending.answerLines.push(cloneLine(line, numbered.remainder))
       }
@@ -478,12 +574,15 @@ function parseAnswers(lines: readonly WordAnalysisLine[], questions: readonly Ra
     }
 
     if (!pending) continue
-    const answerContent = line.text.match(answerContentPattern)
-    if (answerContent) {
+    const inlineField = parseInlineQuestionField(line.text)
+    if (inlineField?.field === 'answer') {
       pending.acceptingAnswer = true
-      if ((answerContent[1] ?? '').trim() || line.images.length) {
-        pending.answerLines.push(cloneLine(line, (answerContent[1] ?? '').trim()))
+      const content = inlineFieldText(inlineField)
+      if (content || line.images.length || line.tables?.length) {
+        pending.answerLines.push(cloneLine(line, content))
       }
+    } else if (inlineField?.field === 'explanation') {
+      pending.acceptingAnswer = false
     } else if (pending.acceptingAnswer) {
       pending.answerLines.push(line)
     }
@@ -525,8 +624,10 @@ function parseExplanations(lines: readonly WordAnalysisLine[], questions: readon
         answerLines: [],
         acceptingAnswer: true,
       }
-      const inlineExplanation = numbered.remainder.match(explanationContentPattern)
-      const content = inlineExplanation ? (inlineExplanation[1] ?? '').trim() : numbered.remainder
+      const inlineField = parseInlineQuestionField(numbered.remainder)
+      const content = inlineField?.field === 'explanation'
+        ? inlineFieldText(inlineField)
+        : inlineField ? '' : numbered.remainder
       if (content || line.images.length || line.tables?.length) {
         pending.answerLines.push(cloneLine(line, content))
       }
@@ -534,12 +635,13 @@ function parseExplanations(lines: readonly WordAnalysisLine[], questions: readon
     }
 
     if (!pending) continue
-    const explanationContent = line.text.match(explanationContentPattern)
-    if (explanationContent) {
-      if ((explanationContent[1] ?? '').trim() || line.images.length || line.tables?.length) {
-        pending.answerLines.push(cloneLine(line, (explanationContent[1] ?? '').trim()))
+    const inlineField = parseInlineQuestionField(line.text)
+    if (inlineField?.field === 'explanation') {
+      const content = inlineFieldText(inlineField)
+      if (content || line.images.length || line.tables?.length) {
+        pending.answerLines.push(cloneLine(line, content))
       }
-    } else {
+    } else if (!inlineField) {
       pending.answerLines.push(line)
     }
   }
@@ -557,25 +659,24 @@ function buildQuestion(
   const inlineAnswerLines: WordAnalysisLine[] = []
   const inlineExplanationLines: WordAnalysisLine[] = []
   let inlineSection: 'answer' | 'explanation' | null = null
-  const parseOptions = raw.section === 'choice' || raw.section === 'true_false' || raw.section === null
+  const firstFieldIndex = raw.lines.findIndex((line) => parseInlineQuestionField(line.text))
+  const questionBodyLines = firstFieldIndex < 0 ? raw.lines : raw.lines.slice(0, firstFieldIndex)
+  // A fill-in question may contain a small A-D choice inside one subquestion.
+  // Its choices belong to the whole stem; exporting them as the question's
+  // options would drop the other blanks when the item is saved as fill-in.
+  const hasMultipleBlanks = (questionBodyLines.map((line) => line.text).join('\n').match(/_{2,}/gu) ?? []).length >= 2
+  const parseOptions = (raw.section === 'choice' || raw.section === 'true_false' || raw.section === null)
+    && !(raw.section === null && hasMultipleBlanks)
+  let returnedToStem = false
 
   for (const line of raw.lines) {
-    const inlineExplanation = line.text.match(explanationContentPattern)
-    if (inlineExplanation) {
-      inlineSection = 'explanation'
-      const content = (inlineExplanation[1] ?? '').trim()
+    const inlineField = parseInlineQuestionField(line.text)
+    if (inlineField) {
+      inlineSection = inlineField.field
+      const content = inlineFieldText(inlineField)
+      const target = inlineField.field === 'answer' ? inlineAnswerLines : inlineExplanationLines
       if (content || line.images.length || line.tables?.length) {
-        inlineExplanationLines.push(cloneLine(line, content))
-      }
-      continue
-    }
-
-    const inlineAnswer = line.text.match(answerContentPattern)
-    if (inlineAnswer) {
-      inlineSection = 'answer'
-      const content = (inlineAnswer[1] ?? '').trim()
-      if (content || line.images.length || line.tables?.length) {
-        inlineAnswerLines.push(cloneLine(line, content))
+        target.push(cloneLine(line, content))
       }
       continue
     }
@@ -586,9 +687,12 @@ function buildQuestion(
       continue
     }
 
-    const split = parseOptions ? splitOptionLine(line) : null
+    if (optionEntries.length && /^\s*[（(]\s*\d{1,2}\s*[）)]/u.test(line.text)) {
+      returnedToStem = true
+    }
+    const split = parseOptions && !returnedToStem ? splitOptionLine(line) : null
     if (!split) {
-      if (optionEntries.length && !line.images.length && !line.tables?.length) {
+      if (optionEntries.length && !returnedToStem && !line.images.length && !line.tables?.length) {
         optionEntries[optionEntries.length - 1]?.lines.push(cloneLine(line))
       }
       else stemLines.push(cloneLine(line))

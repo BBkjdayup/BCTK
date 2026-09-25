@@ -144,7 +144,7 @@ fn read_images_from_bounded_bytes(
     let mut decoded_by_part = HashMap::<String, DecodedImage>::new();
     let mut total_occurrence_bytes = 0u64;
     let mut output = Vec::with_capacity(markers.len());
-    for marker in markers {
+    for (image_index, marker) in markers.into_iter().enumerate() {
         let relationship = relationships.get(&marker.relationship_id).ok_or_else(|| {
             invalid_relationships(format!(
                 "image occurrence references missing relationship {}",
@@ -153,19 +153,47 @@ fn read_images_from_bounded_bytes(
         })?;
 
         if !decoded_by_part.contains_key(&relationship.target_part) {
-            let bytes = read_part_limited(&mut archive, &relationship.target_part, MAX_IMAGE_BYTES)
-                .map_err(|error| match error {
-                    DocxError::LimitExceeded { actual, .. } => DocxError::LimitExceeded {
-                        resource: relationship.target_part.clone(),
-                        limit: MAX_IMAGE_BYTES,
-                        actual,
+            let source_bytes =
+                read_part_limited(&mut archive, &relationship.target_part, MAX_IMAGE_BYTES)
+                    .map_err(|error| match error {
+                        DocxError::LimitExceeded { actual, .. } => DocxError::LimitExceeded {
+                            resource: relationship.target_part.clone(),
+                            limit: MAX_IMAGE_BYTES,
+                            actual,
+                        },
+                        _ => invalid_relationships(format!(
+                            "image relationship {} points to a missing or unreadable part {}",
+                            marker.relationship_id, relationship.target_part
+                        )),
+                    })?;
+            let image_label = format!(
+                "第 {} 张图片（{}）",
+                image_index + 1,
+                relationship.target_part
+            );
+            let bytes = if source_bytes.starts_with(b"\xd7\xcd\xc6\x9a") {
+                super::wmf::convert_placeable_wmf_to_png(&source_bytes).map_err(|message| {
+                    DocxError::Image {
+                        part_name: image_label.clone(),
+                        message,
+                    }
+                })?
+            } else {
+                source_bytes
+            };
+            let (mime_type, width_px, height_px) =
+                inspect_raster_image(&bytes).map_err(|error| match error {
+                    DocxError::Xml { message, .. } => DocxError::Image {
+                        part_name: image_label,
+                        message: if message == "only PNG and JPEG image bytes are supported" {
+                            "图片格式暂不支持，请将该图在 Word 或 WPS 中替换为 PNG 或 JPEG"
+                                .to_owned()
+                        } else {
+                            format!("图片数据无效：{message}")
+                        },
                     },
-                    _ => invalid_relationships(format!(
-                        "image relationship {} points to a missing or unreadable part {}",
-                        marker.relationship_id, relationship.target_part
-                    )),
+                    other => other,
                 })?;
-            let (mime_type, width_px, height_px) = inspect_raster_image(&bytes)?;
             decoded_by_part.insert(
                 relationship.target_part.clone(),
                 DecodedImage {

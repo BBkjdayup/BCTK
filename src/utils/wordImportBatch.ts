@@ -10,6 +10,10 @@ export interface WordImportBatchClassifiable extends WordImportBatchSelectable {
   chapterId: string
 }
 
+export interface WordImportBatchTaggable extends WordImportBatchSelectable {
+  tagIds: string[]
+}
+
 export interface WordImportBatchSelectionState {
   selectedCount: number
   allSelected: boolean
@@ -132,6 +136,26 @@ export function applyWordImportBatchClassification<T extends WordImportBatchClas
     if (!item.selected) continue
     item.subjectId = subjectId
     item.chapterId = chapterId
+    updated.push(item)
+  }
+  return updated
+}
+
+export function applyWordImportBatchTags<T extends WordImportBatchTaggable>(
+  items: readonly T[],
+  tagIds: readonly string[],
+  action: 'add' | 'remove',
+): T[] {
+  const targetIds = new Set(tagIds.filter(Boolean))
+  if (!targetIds.size) return []
+  const updated: T[] = []
+  for (const item of items) {
+    if (!item.selected) continue
+    const next = action === 'add'
+      ? [...new Set([...item.tagIds, ...targetIds])]
+      : item.tagIds.filter((id) => !targetIds.has(id))
+    if (next.length === item.tagIds.length && next.every((id, index) => id === item.tagIds[index])) continue
+    item.tagIds = next
     updated.push(item)
   }
   return updated

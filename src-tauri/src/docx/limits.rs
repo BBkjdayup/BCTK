@@ -11,6 +11,10 @@ pub struct DocxLimits {
     /// Even when enabled, the importer only reads a bounded `Equation Native`
     /// stream and rejects every non-MathType embedded object.
     pub allow_mathtype_ole: bool,
+    /// Allows question import to skip external images referenced only by Word
+    /// headers or footers. Those layout parts are never imported as questions,
+    /// and the external targets are never opened or copied.
+    pub allow_ignored_header_footer_external_images: bool,
     /// Maximum size of the complete `.docx` file.
     pub max_archive_bytes: u64,
     /// Maximum number of ZIP central-directory entries.
@@ -33,6 +37,7 @@ impl Default for DocxLimits {
     fn default() -> Self {
         Self {
             allow_mathtype_ole: false,
+            allow_ignored_header_footer_external_images: false,
             max_archive_bytes: 100 * 1024 * 1024,
             max_entries: 4_096,
             max_total_uncompressed_bytes: 512 * 1024 * 1024,

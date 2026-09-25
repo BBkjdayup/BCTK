@@ -51,6 +51,13 @@ describe('administrator console', () => {
     expect(wrapper.find('.data-table img').exists()).toBe(false)
     expect(wrapper.find('.data-table').html()).toContain('&lt;img')
   })
+  it('shows the permanent free seat separately from a five-person paid package', async () => {
+    fetch.mockImplementation(async url => ({ ok: true, status: 200,
+      json: async () => url.endsWith('/session') ? session : { items: [{ ...owner, plan_name: '5 人包', seat_limit: 5, total_seats: 6 }], page: 1, has_more: false } }))
+    wrapper = mount(AdminApp); await flushPromises()
+    expect(wrapper.get('.users-table').text()).toContain('永久免费 1 位 + 付费 5 位')
+    expect(wrapper.get('.users-table').text()).toContain('6')
+  })
   it('reviews seat changes while preserving both authorization dates', async () => {
     wrapper = mount(AdminApp)
     await flushPromises()

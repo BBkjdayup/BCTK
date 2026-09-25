@@ -98,6 +98,7 @@ function toBoundary(value: string, endOfDay = false) {
 }
 
 const serviceStatus = computed(() => {
+  if (miniStore.settings.freeQuota === 1) return { label: '使用中', type: 'success' as const }
   if (miniStore.settings.paused) return { label: '已暂停', type: 'warning' as const }
   const starts = toBoundary(miniStore.settings.serviceStarts)
   const ends = toBoundary(miniStore.settings.serviceEnds, true)
@@ -114,6 +115,11 @@ const quotaPercent = computed(() => miniStore.settings.quota
   : 0)
 const pendingCount = computed(() => miniStore.members.filter((member) => member.status === 'pending').length)
 const servicePeriodLabel = computed(() => {
+  if (miniStore.settings.freeQuota === 1) {
+    const paid = miniStore.settings.paidStatus
+    const ending = miniStore.settings.paidServiceEnds
+    return paid === 'active' && ending ? `免费名额永久有效 · 付费名额至 ${ending}` : '免费名额永久有效'
+  }
   const starts = miniStore.settings.serviceStarts || '未设置'
   const ends = miniStore.settings.serviceEnds || '未设置'
   return `${starts} 至 ${ends}`
@@ -507,26 +513,29 @@ onMounted(() => {
       <section v-else class="mini-section">
         <div class="mini-plan-grid">
           <section class="surface mini-plan-details">
-            <h3>当前服务周期</h3>
+            <h3>名额概览</h3>
             <dl class="mini-plan-values">
-              <div><dt>授权名额</dt><dd>{{ miniStore.settings.quota }} 位</dd></div>
-              <div><dt>开始日期</dt><dd>{{ miniStore.settings.serviceStarts || '—' }}</dd></div>
-              <div><dt>到期日期</dt><dd>{{ miniStore.settings.serviceEnds || '—' }}</dd></div>
+              <div><dt>当前总名额</dt><dd>{{ miniStore.settings.quota }} 位</dd></div>
+              <div v-if="miniStore.settings.freeQuota === 1"><dt>永久免费</dt><dd>1 位</dd></div>
+              <div v-if="miniStore.settings.freeQuota === 1"><dt>付费套餐</dt><dd>{{ miniStore.settings.paidQuota || 0 }} 位{{ miniStore.settings.paidStatus === 'active' ? ' · 使用中' : miniStore.settings.paidStatus === 'paused' ? ' · 已暂停' : miniStore.settings.paidStatus === 'expired' ? ' · 已到期' : miniStore.settings.paidStatus === 'scheduled' ? ' · 未开始' : '' }}</dd></div>
+              <div v-if="miniStore.settings.paidServiceStarts || miniStore.settings.freeQuota !== 1"><dt>开始日期</dt><dd>{{ miniStore.settings.paidServiceStarts || miniStore.settings.serviceStarts || '—' }}</dd></div>
+              <div v-if="miniStore.settings.paidServiceEnds || miniStore.settings.freeQuota !== 1"><dt>到期日期</dt><dd>{{ miniStore.settings.paidServiceEnds || miniStore.settings.serviceEnds || '—' }}</dd></div>
               <div><dt>服务状态</dt><dd><el-tag :type="serviceStatus.type">{{ serviceStatus.label }}</el-tag></dd></div>
             </dl>
             <el-button type="primary" plain class="mini-contact-entry" @click="supportOpen = true">开通 / 续费</el-button>
           </section>
           <section class="surface mini-quota-card">
-            <div class="mini-quota-card__head"><div><span class="mini-caption">本周期已使用</span><strong>{{ miniStore.usedQuota }} <small>/ {{ miniStore.settings.quota }} 位</small></strong></div><el-tag :type="serviceStatus.type">{{ serviceStatus.label }}</el-tag></div>
+            <div class="mini-quota-card__head"><div><span class="mini-caption">已占用名额</span><strong>{{ miniStore.usedQuota }} <small>/ {{ miniStore.settings.quota }} 位</small></strong></div><el-tag :type="serviceStatus.type">{{ serviceStatus.label }}</el-tag></div>
             <el-progress :percentage="quotaPercent" :stroke-width="12" :color="quotaPercent >= 100 ? '#dc2626' : '#2563eb'" />
             <div class="mini-quota-card__foot"><span>剩余 {{ miniStore.remainingQuota }} 位</span><span>{{ servicePeriodLabel }}</span></div>
-            <p>名额按学员账号去重。同一学员跨邀请码重复申请只占一个名额；停用或恢复不会改变已使用数量。</p>
+            <p>免费名额永久有效；付费名额仅在套餐有效期内可用。名额按学员账号去重，停用或恢复不会退还已占用的名额。</p>
           </section>
         </div>
         <div class="surface mini-table-wrap mini-ledger">
           <div class="mini-ledger__head"><h3>授权记录</h3><span>共 {{ countedMembers.length }} 条计入记录</span></div>
           <el-table :data="countedMembers" row-key="id" height="100%">
             <el-table-column label="成员" min-width="220"><template #default="{ row }"><strong>{{ row.name }}</strong><span class="mini-table-sub">{{ row.account }}</span></template></el-table-column>
+            <el-table-column v-if="miniStore.settings.freeQuota === 1" label="名额" width="115"><template #default="{ row }">{{ row.seatType === 'free' ? '永久免费' : row.seatType === 'paid' ? '付费套餐' : '—' }}</template></el-table-column>
             <el-table-column label="通过时间" width="155"><template #default="{ row }">{{ formatDateTime(row.joinedAt) }}</template></el-table-column>
             <el-table-column label="状态" width="105"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row.status).type">{{ memberStatus(row.status).label }}</el-tag></template></el-table-column>
           </el-table>

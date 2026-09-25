@@ -10,6 +10,7 @@ import { isDesktopRuntime } from '../services/backend'
 import { suppressUnconfiguredContextMenu } from '../utils/contextMenuGuard'
 import { usePaperStore } from '../stores/paper'
 import { canCloseApplication, registerCloseGuard } from '../services/closeProtection'
+import { installStagedAppUpdateOnClose } from '../utils/appUpdateFlow'
 
 const route = useRoute()
 const router = useRouter()
@@ -19,6 +20,12 @@ let unlistenClose: (() => void) | undefined
 let shellActive = true
 let closing = false
 const removePaperGuard = registerCloseGuard(() => paperStore.prepareToClose(), 100)
+
+async function completeSafeClose() {
+  if (!(await canCloseApplication())) return
+  if (await installStagedAppUpdateOnClose()) return
+  await getCurrentWindow().destroy()
+}
 
 function warnBeforeClose(event: BeforeUnloadEvent) {
   if (!paperStore.isDirty && !paperStore.saving) return
@@ -75,7 +82,7 @@ onMounted(async () => {
         if (closing) return
         closing = true
         try {
-          if (await canCloseApplication()) await getCurrentWindow().destroy()
+          await completeSafeClose()
         } catch (reason) { ElMessage.error(errorMessage(reason, '关闭前保存失败，窗口保持打开')) }
         finally { closing = false }
       })
@@ -105,7 +112,7 @@ async function closeWindow() {
   if (!desktopAvailable || closing) return
   closing = true
   try {
-    if (await canCloseApplication()) await getCurrentWindow().destroy()
+    await completeSafeClose()
   } catch (reason) { ElMessage.error(errorMessage(reason, '关闭前保存失败，窗口保持打开')) }
   finally { closing = false }
 }

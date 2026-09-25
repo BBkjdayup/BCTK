@@ -34,7 +34,7 @@ let activityTimer
 const activity = () => { lastActivity = Date.now() }
 
 const titles = { users: '用户管理', plans: '套餐设置', support: '客服信息', audit: '变更记录' }
-const statuses = { inactive: '未开通', active: '有效', paused: '已暂停', expired: '已到期', scheduled: '未生效', disabled: '账号停用' }
+const statuses = { free: '免费使用', active: '付费有效', paused: '付费已暂停', expired: '付费已到期', scheduled: '付费未生效', disabled: '账号停用' }
 const actions = { grant_create: '开通授权', grant_update: '修改授权', plan_create: '新增套餐', plan_update: '修改套餐',
   support_update: '修改客服信息',
   admin_login: '管理员登录', admin_logout: '退出登录', admin_reauth: '身份复核', admin_role_set: '调整管理权限' }
@@ -147,7 +147,7 @@ function review() {
   if (imageReading.value) { formError.value = '请等待图片读取完成'; return }
   if (!draft.reason.trim() || draft.reason.trim().length > 300) { formError.value = '请填写调整原因，最多 300 字'; return }
   if (modal.value.kind === 'grant') {
-    if (!draft.plan_id || !Number.isInteger(draft.seat_limit) || draft.seat_limit < 1 || draft.seat_limit > 10000) { formError.value = '请选择套餐并填写 1 至 10000 的整数人数'; return }
+    if (!draft.plan_id || !Number.isInteger(draft.seat_limit) || draft.seat_limit < 1 || draft.seat_limit > 10000) { formError.value = '请选择套餐并填写 1 至 10000 的付费名额'; return }
     if (!draft.starts_on || !draft.ends_on || draft.ends_on < draft.starts_on) { formError.value = '请检查开始日期和到期日期'; return }
   } else if (modal.value.kind === 'support') {
     if (!draft.display_name.trim() || draft.display_name.trim().length > 40 || !/^[A-Za-z][A-Za-z0-9_-]{5,19}$/.test(draft.wechat_id.trim())
@@ -168,7 +168,7 @@ const diffRows = computed(() => {
   }
   if (modal.value.kind === 'grant') {
     const planName = draft.plan_id === before.plan_id ? before.plan_name : plans.value.find(p => p.id === draft.plan_id)?.name
-    return [row('套餐', before.plan_name, planName), row('人数上限', before.seat_limit, draft.seat_limit),
+    return [row('套餐', before.plan_name, planName), row('付费名额', before.seat_limit, draft.seat_limit), row('付费生效后总名额', before.seat_limit == null ? 1 : before.seat_limit + 1, draft.seat_limit + 1),
       row('开始日期', dateText(before.starts_on), dateText(draft.starts_on)), row('到期日期', dateText(before.ends_on), dateText(draft.ends_on)),
       row('访问设置', before.version ? (before.paused ? '暂停' : '正常') : '未开通', draft.paused ? '暂停' : '正常')]
   }
@@ -204,7 +204,7 @@ async function userAudit(user) {
 const auditRows = computed(() => {
   const record = modal.value?.record
   if (!record) return []
-  const labels = { name: '套餐名称', kind: '类型', seats: '套餐人数', enabled: '启用', plan_name: '套餐', seat_limit: '人数上限', starts_on: '开始日期', ends_on: '到期日期', paused: '暂停访问', display_name: '客服名称', wechat_id: '微信号', service_hours: '联系时间', version: '版本' }
+  const labels = { name: '套餐名称', kind: '类型', seats: '付费名额', enabled: '启用', plan_name: '套餐', seat_limit: '付费名额', starts_on: '开始日期', ends_on: '到期日期', paused: '暂停付费名额', display_name: '客服名称', wechat_id: '微信号', service_hours: '联系时间', version: '版本' }
   const format = value => value == null ? '—' : typeof value === 'boolean' ? (value ? '是' : '否') : value === 'fixed' ? '固定人数' : value === 'custom' ? '自定义人数' : String(value)
   const rows = Object.entries(labels).filter(([key]) => key in (record.before_value || {}) || key in (record.after_value || {}))
     .map(([key, label]) => ({ label, before: format(record.before_value?.[key]), after: format(record.after_value?.[key]) }))
@@ -278,11 +278,11 @@ onUnmounted(() => {
         <p v-else-if="!items.length && !error" class="empty">{{ view === 'audit' ? '暂无变更记录' : '没有符合条件的记录' }}</p>
         <div v-else-if="items.length" class="table-wrap">
           <table v-if="view === 'users'" class="data-table users-table">
-            <thead><tr><th>用户 / 账号</th><th>套餐</th><th>人数上限</th><th>授权有效期</th><th>状态</th><th class="right">操作</th></tr></thead>
+            <thead><tr><th>用户 / 账号</th><th>付费套餐</th><th>当前总名额</th><th>付费有效期</th><th>状态</th><th class="right">操作</th></tr></thead>
             <tbody><tr v-for="user in items" :key="user.id">
               <td data-label="用户"><strong>{{ user.username }}</strong><span class="secondary">{{ user.email || `ID ${user.id.slice(0, 8)}` }}</span></td>
-              <td data-label="套餐">{{ user.plan_name || '—' }}</td><td data-label="人数上限" class="numeric">{{ user.seat_limit ?? '—' }}</td>
-              <td data-label="有效期" class="numeric">{{ dateText(user.ends_on) }}<span class="secondary">{{ user.starts_on ? `${dateText(user.starts_on)} 起` : '尚未开通' }}</span></td>
+              <td data-label="付费套餐">{{ user.plan_name || '未购买' }}<span class="secondary">永久免费 1 位{{ user.seat_limit ? ` + 付费 ${user.seat_limit} 位` : '' }}</span></td><td data-label="当前总名额" class="numeric">{{ user.total_seats ?? (user.seat_limit ? user.seat_limit + 1 : 1) }}</td>
+              <td data-label="付费有效期" class="numeric">{{ dateText(user.ends_on) }}<span class="secondary">{{ user.starts_on ? `${dateText(user.starts_on)} 起` : '免费名额永久有效' }}</span></td>
               <td data-label="状态"><span class="status" :class="user.status">{{ statuses[user.status] }}</span></td>
               <td class="row-actions"><button class="text-button" :disabled="user.account_status !== 'active'" @click="editGrant(user)">{{ user.version ? '编辑授权' : '开通授权' }}</button><button class="text-button muted" @click="userAudit(user)">记录</button></td>
             </tr></tbody>
@@ -312,8 +312,8 @@ onUnmounted(() => {
         <form v-else-if="modal.step === 'edit'" @submit.prevent="review">
           <div v-if="modal.kind === 'grant'" class="form-grid">
             <label class="span-two">套餐<select v-model="draft.plan_id" required @change="selectPlan"><option value="" disabled>请选择套餐</option><option v-for="plan in planOptions" :key="plan.id" :value="plan.id">{{ plan.id === modal.original.plan_id && plan.name !== modal.original.plan_name ? `${modal.original.plan_name}（原授权）` : plan.name }}{{ plan.enabled ? '' : ' · 已停用' }}</option></select></label>
-            <label>人数上限<input v-model.number="draft.seat_limit" type="number" min="1" max="10000" step="1" required></label>
-            <label>访问设置<select v-model="draft.paused"><option :value="false">正常</option><option :value="true">暂停</option></select></label>
+            <label>付费名额<input v-model.number="draft.seat_limit" type="number" min="1" max="10000" step="1" required></label>
+            <label>付费名额状态<select v-model="draft.paused"><option :value="false">正常</option><option :value="true">暂停</option></select></label>
             <label>开始日期<input v-model="draft.starts_on" type="date" min="2020-01-01" max="2100-12-31" required></label>
             <label>到期日期<input v-model="draft.ends_on" type="date" :min="draft.starts_on || '2020-01-01'" max="2100-12-31" required></label>
           </div>
@@ -331,7 +331,7 @@ onUnmounted(() => {
             <label>状态<select v-model="draft.enabled"><option :value="true">可选</option><option :value="false">停用</option></select></label>
           </div>
           <label class="reason-field">调整原因<textarea v-model="draft.reason" rows="3" maxlength="300" required placeholder="填写开通依据或本次调整原因"></textarea></label>
-          <p v-if="modal.kind === 'grant'" class="muted small">到期日包含当天（北京时间）。调整人数不会改变日期。</p>
+          <p v-if="modal.kind === 'grant'" class="muted small">每个题库另有 1 个永久免费名额。5 人包增加 5 位，生效期间共 6 位；到期日包含当天（北京时间）。</p>
           <p v-if="formError" class="error-message" role="alert">{{ formError }}</p>
           <div class="dialog-actions"><button type="button" @click="closeModal">取消</button><button class="primary">核对变更</button></div>
         </form>

@@ -8,7 +8,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#install-on-windows)
-[![Version](https://img.shields.io/badge/release-v0.1.88-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.88)
+[![Version](https://img.shields.io/badge/source-v0.1.94-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.94)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#architecture-and-data-boundaries)
 
 <p align="center">
@@ -21,7 +21,9 @@ Question data is stored locally in SQLite. Since v0.1.85, all local desktop feat
 
 Built with **Tauri 2, Vue 3, TypeScript, Rust, and SQLite**. Original source code is available under the **MIT License**. The application interface is currently in Chinese.
 
-**[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.88 source tag](https://github.com/BBkjdayup/BCTK/tree/v0.1.88) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
+**[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.94 source tag](https://github.com/BBkjdayup/BCTK/tree/v0.1.94) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
+
+The v0.1.94 source update includes Word / MathType import compatibility fixes, update-flow improvements, and a correction to the mini-program free-seat display. See the [v0.1.94 source notes](docs/releases/v0.1.94.en.md). The version of the official Windows installer is shown on the [download page](https://tktiku.cn/#download).
 
 ## Workflow at a glance
 
@@ -54,7 +56,7 @@ The default workflow stays on the local computer. Selected paper content is sent
   </tr>
 </table>
 
-The screenshots were captured from the v0.1.83 browser demo; v0.1.88 keeps the same core workspace. The demo uses built-in sample questions and does not access real question-bank files.
+The screenshots were captured from the v0.1.83 browser demo; the actual v0.1.94 interface may differ. The demo uses built-in sample questions and does not access real question-bank files.
 
 ## Start here
 
@@ -142,13 +144,13 @@ flowchart TB
     Core --> Files["Images · templates · backups · exports"]
   end
 
-  Core -. "version checks only" .-> Update["Official update endpoint"]
+  Core -. "version checks · background downloads" .-> Update["Official update endpoint"]
   Core -. "paper snapshot explicitly published by the user" .-> Mini["Optional mini-program service"]
 ```
 
 - The question bank, images, templates, backups, and exports remain in the local data directory by default.
 - The retired question-bank cloud-sync feature was removed in v0.1.85; the application does not silently upload the local database.
-- The application checks the official update endpoint for new versions.
+- The application checks the official update endpoint and downloads signature-verified updates in the background.
 - Optional mini-program features connect only after the user signs in and explicitly publishes a selected paper snapshot and supported resources.
 
 ## Repository scope

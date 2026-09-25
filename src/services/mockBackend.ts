@@ -799,14 +799,18 @@ function canonicalDraftUuid(value: unknown, label: string) {
 
 function normalizedWordImportFileName(value: unknown) {
   if (typeof value !== 'string') taxonomyError('来源 Word 文件名无效。')
-  const normalized = value.trim().normalize('NFKC').trim()
-  if (!normalized
-    || [...normalized].length > MAX_WORD_IMPORT_SOURCE_NAME_CHARS
-    || /[\\/:\p{Cc}]/u.test(normalized)
+  const normalized = value.trim().normalize('NFC').trim()
+  if (!normalized) taxonomyError('来源 Word 文件名不能为空。')
+  if ([...normalized].length > MAX_WORD_IMPORT_SOURCE_NAME_CHARS) {
+    taxonomyError('来源 Word 文件名不能超过 255 个字符。')
+  }
+  if (/[\\/:\p{Cc}]/u.test(normalized)
     || normalized === '.'
-    || normalized === '..'
-    || !normalized.toLocaleLowerCase('en-US').endsWith('.docx')) {
-    taxonomyError('来源文件必须是不含路径、以 .docx 结尾且不超过 255 个字符的文件名。')
+    || normalized === '..') {
+    taxonomyError('来源 Word 文件名不能包含路径或非法字符。')
+  }
+  if (!normalized.toLocaleLowerCase('en-US').endsWith('.docx')) {
+    taxonomyError('来源 Word 文件名必须以 .docx 结尾。')
   }
   return normalized
 }

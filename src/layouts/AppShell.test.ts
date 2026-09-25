@@ -1,4 +1,4 @@
-import { mount } from '@vue/test-utils'
+import { flushPromises, mount } from '@vue/test-utils'
 import { nextTick, reactive } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
@@ -6,6 +6,18 @@ import AppShell from './AppShell.vue'
 
 const push = vi.fn()
 const route = reactive({ path: '/questions' })
+const windowApi = vi.hoisted(() => ({
+  minimize: vi.fn(),
+  toggleMaximize: vi.fn(),
+  close: vi.fn(),
+  destroy: vi.fn(),
+  onCloseRequested: vi.fn().mockResolvedValue(() => undefined),
+}))
+const closeProtection = vi.hoisted(() => ({
+  canCloseApplication: vi.fn(),
+  registerCloseGuard: vi.fn(() => vi.fn()),
+}))
+const updater = vi.hoisted(() => ({ installStagedAppUpdateOnClose: vi.fn() }))
 const appStore = {
   appVersion: '0.1.0',
   databaseHealthy: true,
@@ -26,14 +38,11 @@ vi.mock('../stores/app', () => ({
 }))
 
 vi.mock('@tauri-apps/api/window', () => ({
-  getCurrentWindow: () => ({
-    minimize: vi.fn(),
-    toggleMaximize: vi.fn(),
-    close: vi.fn(),
-    destroy: vi.fn(),
-    onCloseRequested: vi.fn().mockResolvedValue(() => undefined),
-  }),
+  getCurrentWindow: () => windowApi,
 }))
+
+vi.mock('../services/closeProtection', () => closeProtection)
+vi.mock('../utils/appUpdateFlow', () => updater)
 
 function setDesktopRuntime(enabled: boolean) {
   const runtimeWindow = window as unknown as Record<string, unknown>
@@ -59,7 +68,12 @@ function renderShell() {
   })
 }
 
-beforeEach(() => setActivePinia(createPinia()))
+beforeEach(() => {
+  setActivePinia(createPinia())
+  closeProtection.canCloseApplication.mockResolvedValue(true)
+  updater.installStagedAppUpdateOnClose.mockResolvedValue(false)
+  windowApi.onCloseRequested.mockResolvedValue(() => undefined)
+})
 
 afterEach(() => {
   setDesktopRuntime(false)
@@ -86,6 +100,23 @@ describe('AppShell runtime identity', () => {
     expect(wrapper.find('.browser-preview-banner').exists()).toBe(false)
     expect(wrapper.get('.titlebar__version').text()).toContain('Windows 桌面版')
     expect(wrapper.get('.topnav__status').text()).toContain('免费离线版')
+  })
+
+  it('hands a staged update to the installer only after close protection passes', async () => {
+    setDesktopRuntime(true)
+    updater.installStagedAppUpdateOnClose.mockResolvedValue(true)
+    const wrapper = renderShell()
+    await flushPromises()
+    const onClose = windowApi.onCloseRequested.mock.calls[0]?.[0] as ((event: { preventDefault: () => void }) => Promise<void>)
+    const event = { preventDefault: vi.fn() }
+
+    await onClose(event)
+
+    expect(event.preventDefault).toHaveBeenCalledTimes(1)
+    expect(closeProtection.canCloseApplication).toHaveBeenCalledTimes(1)
+    expect(updater.installStagedAppUpdateOnClose).toHaveBeenCalledTimes(1)
+    expect(windowApi.destroy).not.toHaveBeenCalled()
+    wrapper.unmount()
   })
 
   it('allows system printing without a license or account', () => {

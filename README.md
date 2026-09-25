@@ -8,7 +8,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#获取与使用)
-[![Version](https://img.shields.io/badge/release-v0.1.88-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.88)
+[![Version](https://img.shields.io/badge/source-v0.1.94-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.94)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#技术组成与目录)
 
 <p align="center">
@@ -21,7 +21,9 @@ TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件
 
 项目基于 **Tauri 2 + Vue 3 + TypeScript + Rust + SQLite** 构建，源码采用 **MIT 许可证**。
 
-**[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.88 源码](https://github.com/BBkjdayup/BCTK/tree/v0.1.88) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
+**[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.94 源码](https://github.com/BBkjdayup/BCTK/tree/v0.1.94) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
+
+v0.1.94 源码汇总了近期的 Word / MathType 导入兼容修复、更新流程改进，以及小程序免费名额显示修复。详情见 [v0.1.94 源码说明](docs/releases/v0.1.94.md)；官网安装包版本以[下载页面](https://tktiku.cn/#download)为准。
 
 ## 一图了解使用流程
 
@@ -54,7 +56,7 @@ flowchart LR
   </tr>
 </table>
 
-截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.88 延续相同的核心工作区。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
+截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.94 的实际界面可能有所变化。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
 
 ## 从这里开始
 
@@ -211,7 +213,7 @@ flowchart TB
     Core --> Files["图片 · 模板 · 备份 · 导出文件"]
   end
 
-  Core -. "仅检查版本" .-> Update["官方更新源"]
+  Core -. "版本检查 · 后台下载" .-> Update["官方更新源"]
   Core -. "用户主动发布的试卷快照" .-> Mini["可选小程序服务"]
 ```
 
@@ -221,7 +223,7 @@ flowchart TB
 - 完整备份使用 `.tqb` 格式，包含版本化清单和文件摘要校验。
 - 数据目录迁移采用“复制 → 校验 → 切换 → 保留原目录”的流程。
 - 旧题库云同步功能已在 v0.1.85 退役；本地题库不会被后台整库上传。
-- 软件会联网检查官方更新。只有用户主动使用小程序功能时，才会登录配套服务并上传明确选择发布的试卷快照及其受支持资源。
+- 软件会联网检查并在后台下载经过签名校验的官方更新。只有用户主动使用小程序功能时，才会登录配套服务并上传明确选择发布的试卷快照及其受支持资源。
 
 ## 常见问题
 
