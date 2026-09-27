@@ -21,7 +21,7 @@ import { useMiniProgramCloudStore } from '../stores/miniProgramCloud'
 import { errorMessage } from '../services/errors'
 import { useMiniProgramStore } from '../stores/miniProgram'
 import type { Paper, PaperSummary } from '../types/domain'
-import type { MiniProgramMemberStatus, MiniProgramPublication } from '../types/miniProgram'
+import type { MiniProgramMember, MiniProgramMemberStatus, MiniProgramPublication } from '../types/miniProgram'
 import { currentPublicationRows, publicationActions, publicationRow, type PublicationRow } from '../utils/miniProgramPublicationRows'
 
 type Section = 'papers' | 'invites' | 'members' | 'plan'
@@ -203,7 +203,19 @@ function inviteStatus(invite: { active: boolean; expiresAt: number }) {
   return { label: '使用中', type: 'success' as const }
 }
 
-function memberStatus(status: MiniProgramMemberStatus) {
+function memberStatus(member: MiniProgramMember) {
+  if (member.status === 'active') {
+    const access = {
+      paused: { label: '套餐已暂停', type: 'warning' as const },
+      scheduled: { label: '套餐未生效', type: 'info' as const },
+      expired: { label: '套餐已到期', type: 'danger' as const },
+      unseated: { label: '待重新授权', type: 'warning' as const },
+    }
+    if (member.accessStatus && member.accessStatus in access) {
+      return access[member.accessStatus as keyof typeof access]
+    }
+  }
+  const status: MiniProgramMemberStatus = member.status
   const labels: Record<MiniProgramMemberStatus, string> = {
     pending: '待审核', active: '使用中', stopped: '已停用', rejected: '已驳回',
   }
@@ -345,7 +357,7 @@ function saveMember() {
 
 async function approveMember(id: string) {
   try {
-    if (await miniStore.approveMember(id)) ElMessage.success('成员已通过，名额已计入本周期')
+    if (await miniStore.approveMember(id)) ElMessage.success('成员已授权，名额已更新')
   } catch (reason) {
     ElMessage.warning(errorMessage(reason, '成员未能通过审核'))
   }
@@ -366,7 +378,16 @@ async function stopMember(id: string) {
       type: 'warning', confirmButtonText: '停用', cancelButtonText: '取消',
     })
   } catch { return }
-  await perform(() => miniStore.stopMember(id), '成员已停用，名额保持计入')
+  await perform(() => miniStore.stopMember(id), '成员已停用，已占用名额不会释放')
+}
+
+async function removeMember(id: string) {
+  try {
+    await ElMessageBox.confirm('移除后，该成员立即失去题库访问权限，免费或付费名额会立即释放；其练题记录仍保留。重新加入需要再次申请和审核。', '移除成员', {
+      type: 'warning', confirmButtonText: '确认移除', cancelButtonText: '取消',
+    })
+  } catch { return }
+  await perform(() => miniStore.removeMember(id), '成员已移除，名额已释放')
 }
 
 async function restoreMember(id: string) {
@@ -485,7 +506,7 @@ onMounted(() => {
           <div class="mini-table-toolbar mini-table-toolbar--members" role="group" aria-label="成员筛选与操作">
             <el-radio-group v-model="memberFilter" size="small">
               <el-radio-button label="pending">待审核 {{ pendingCount }}</el-radio-button>
-              <el-radio-button label="active">使用中</el-radio-button>
+              <el-radio-button label="active">已授权</el-radio-button>
               <el-radio-button label="stopped">已停用</el-radio-button>
               <el-radio-button label="all">全部</el-radio-button>
             </el-radio-group>
@@ -495,12 +516,12 @@ onMounted(() => {
           <el-table :data="filteredMembers" row-key="id" height="100%">
             <el-table-column label="成员" min-width="220"><template #default="{ row }"><strong>{{ row.name }}</strong><span class="mini-table-sub">{{ row.account }}</span></template></el-table-column>
             <el-table-column label="申请时间" width="145"><template #default="{ row }">{{ formatDateTime(row.requestedAt) }}</template></el-table-column>
-            <el-table-column label="状态" width="105"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row.status).type">{{ memberStatus(row.status).label }}</el-tag></template></el-table-column>
-            <el-table-column label="操作" width="230" fixed="right">
+            <el-table-column label="状态" width="120"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row).type">{{ memberStatus(row).label }}</el-tag></template></el-table-column>
+            <el-table-column label="操作" width="265" fixed="right">
               <template #default="{ row }">
                 <template v-if="row.status === 'pending'"><el-button link type="primary" :icon="Check" @click="approveMember(row.id)">通过</el-button><el-button link type="danger" :icon="Delete" @click="rejectMember(row.id)">驳回</el-button></template>
-                <el-button v-else-if="row.status === 'active'" link type="danger" @click="stopMember(row.id)">停用</el-button>
-                <el-button v-else-if="row.status === 'stopped'" link type="primary" @click="restoreMember(row.id)">恢复</el-button>
+                <template v-else-if="row.status === 'active'"><el-button v-if="row.accessStatus && row.accessStatus !== 'active' && miniStore.remainingQuota > 0" link type="primary" @click="approveMember(row.id)">重新授权</el-button><el-button link @click="stopMember(row.id)">停用</el-button><el-button link type="danger" :icon="Delete" @click="removeMember(row.id)">移除</el-button></template>
+                <template v-else-if="row.status === 'stopped'"><el-button link type="primary" @click="restoreMember(row.id)">恢复</el-button><el-button link type="danger" :icon="Delete" @click="removeMember(row.id)">移除</el-button></template>
                 <span v-else class="mini-muted">无需操作</span>
               </template>
             </el-table-column>
@@ -528,7 +549,7 @@ onMounted(() => {
             <div class="mini-quota-card__head"><div><span class="mini-caption">已占用名额</span><strong>{{ miniStore.usedQuota }} <small>/ {{ miniStore.settings.quota }} 位</small></strong></div><el-tag :type="serviceStatus.type">{{ serviceStatus.label }}</el-tag></div>
             <el-progress :percentage="quotaPercent" :stroke-width="12" :color="quotaPercent >= 100 ? '#dc2626' : '#2563eb'" />
             <div class="mini-quota-card__foot"><span>剩余 {{ miniStore.remainingQuota }} 位</span><span>{{ servicePeriodLabel }}</span></div>
-            <p>免费名额永久有效；付费名额仅在套餐有效期内可用。名额按学员账号去重，停用或恢复不会退还已占用的名额。</p>
+            <p>免费名额永久有效；付费名额仅在套餐有效期内可用。停用成员不会释放名额，移除成员会立即释放名额并撤销访问。</p>
           </section>
         </div>
         <div class="surface mini-table-wrap mini-ledger">
@@ -537,7 +558,7 @@ onMounted(() => {
             <el-table-column label="成员" min-width="220"><template #default="{ row }"><strong>{{ row.name }}</strong><span class="mini-table-sub">{{ row.account }}</span></template></el-table-column>
             <el-table-column v-if="miniStore.settings.freeQuota === 1" label="名额" width="115"><template #default="{ row }">{{ row.seatType === 'free' ? '永久免费' : row.seatType === 'paid' ? '付费套餐' : '—' }}</template></el-table-column>
             <el-table-column label="通过时间" width="155"><template #default="{ row }">{{ formatDateTime(row.joinedAt) }}</template></el-table-column>
-            <el-table-column label="状态" width="105"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row.status).type">{{ memberStatus(row.status).label }}</el-tag></template></el-table-column>
+            <el-table-column label="状态" width="120"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row).type">{{ memberStatus(row).label }}</el-tag></template></el-table-column>
           </el-table>
         </div>
       </section>

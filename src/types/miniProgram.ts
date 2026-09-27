@@ -43,4 +43,5 @@ export interface MiniProgramMember {
   stoppedAt: number | null
   reason: string | null
   seatType?: 'free' | 'paid' | null
+  accessStatus?: 'active' | 'paused' | 'scheduled' | 'expired' | 'unseated' | null
 }

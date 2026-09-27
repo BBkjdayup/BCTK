@@ -275,6 +275,18 @@ export const useMiniProgramStore = defineStore('miniProgram', () => {
     return true
   }
 
+  function removeMember(id: string) {
+    const index = members.value.findIndex((member) => member.id === id)
+    if (index < 0 || !['active', 'stopped'].includes(members.value[index]!.status)) return false
+    const account = members.value[index]!.account.trim().toLocaleLowerCase('zh-CN')
+    members.value.splice(index, 1)
+    // One account can appear in more than one local demo record. Removing its
+    // authorization must release every duplicate claim for that account.
+    members.value = members.value.filter((member) => member.account.trim().toLocaleLowerCase('zh-CN') !== account)
+    persist()
+    return true
+  }
+
   return {
     settings,
     publications,
@@ -294,5 +306,6 @@ export const useMiniProgramStore = defineStore('miniProgram', () => {
     rejectMember,
     stopMember,
     restoreMember,
+    removeMember,
   }
 })

@@ -1,6 +1,6 @@
 [package]
 name = "zhitiku-desktop"
-version = "0.1.94"
+version = "0.1.95"
 description = "TK试题题库 Windows 离线题库管理软件"
 authors = ["Zhitiku"]
 license = "MIT"

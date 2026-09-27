@@ -17,19 +17,22 @@ vi.mock('element-plus', async original => ({
 const publication = (paperId = 'remote') => ({ paperId, title: '另一台电脑发布的试卷', questionCount: 5, paperRowVersion: 2, published: true, publishedAt: Date.now() })
 let active = [publication()]
 let history = [{ ...publication('old'), title: '旧的撤回记录', published: false }]
+let members: Array<Record<string, unknown>> = []
 let wrapper: VueWrapper | undefined
-const state = () => ({ title: '我的题库', settings: { quota: 10, usedQuota: 0, serviceStarts: '2020-01-01', serviceEnds: '2099-12-31', paused: false }, publications: active, invites: [], members: [] })
+const state = () => ({ title: '我的题库', settings: { quota: 10, usedQuota: 0, serviceStarts: '2020-01-01', serviceEnds: '2099-12-31', paused: false }, publications: active, invites: [], members })
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
   setActivePinia(createPinia())
   active = [publication()]; history = [{ ...publication('old'), title: '旧的撤回记录', published: false }]
+  members = []
   mocks.login.mockResolvedValue({ id: 'teacher', username: 'teacher' })
   mocks.confirm.mockResolvedValue('confirm')
   mocks.listPapers.mockResolvedValue({ items: [], total: 0, page: 1, pageSize: 500 })
   mocks.request.mockImplementation(async (method: string, path: string, body?: { page: number; pageSize: number; keyword: string }) => {
     if (method === 'GET') return state()
+    if (method === 'DELETE' && path.startsWith('/members/')) { members = members.filter(m => m.id !== path.slice('/members/'.length)); return { ok: true } }
     if (method === 'DELETE') { history.unshift(...active.map(p => ({ ...p, published: false }))); active = []; return { ok: true } }
     if (path === '/publications/search' && body) {
       const found = history.filter(p => p.title.includes(body.keyword))
@@ -97,4 +100,25 @@ it('still shows remote publications if the local paper database cannot be read',
   const view = await render()
   expect(view.text()).toContain('另一台电脑发布的试卷')
   expect(view.findAll('button').find(button => button.text() === '取消公开')!.attributes('disabled')).toBeUndefined()
+})
+
+it('keeps expired authorized members out of pending review and lets the owner remove them', async () => {
+  members = [{ id: 'expired-member', name: '过期学员', account: 'student-id', inviteId: 'invite',
+    status: 'active', accessStatus: 'expired', countedInCycle: false,
+    requestedAt: Date.now(), joinedAt: Date.now(), stoppedAt: null, reason: null }]
+  const view = await render()
+  await view.findAll('button').find(button => button.text() === '成员审核')!.trigger('click')
+  await flushPromises()
+  expect(view.text()).toContain('待审核 0')
+  expect(view.findAll('tr.el-table__row')).toHaveLength(0)
+  await view.get('input[type="radio"][value="active"]').setValue()
+  await flushPromises()
+  expect(view.text()).toContain('过期学员')
+  expect(view.text()).toContain('套餐已到期')
+  expect(view.findAll('button').some(button => button.text() === '驳回')).toBe(false)
+  await view.findAll('button').find(button => button.text() === '移除')!.trigger('click')
+  await flushPromises()
+  expect(mocks.confirm).toHaveBeenCalled()
+  expect(mocks.request).toHaveBeenCalledWith('DELETE', '/members/expired-member')
+  expect(view.text()).not.toContain('过期学员')
 })

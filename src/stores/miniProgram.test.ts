@@ -74,6 +74,20 @@ describe('mini-program management quota', () => {
     expect(store.countedMembers.map((member) => member.id)).toEqual(expect.arrayContaining([first.id, second.id, duplicate.id]))
   })
 
+  it('releases a seat when an authorized member is removed but not when stopped', () => {
+    const store = useMiniProgramStore()
+    const invite = store.createInvite({ label: '试用', validDays: 30 })
+    const first = store.addMember({ name: '甲', account: 'student-a', inviteId: invite.id })
+    const second = store.addMember({ name: '乙', account: 'student-b', inviteId: invite.id })
+    expect(store.approveMember(first.id)).toBe(true)
+    expect(store.stopMember(first.id)).toBe(true)
+    expect(store.remainingQuota).toBe(0)
+    expect(store.removeMember(first.id)).toBe(true)
+    expect(store.remainingQuota).toBe(1)
+    expect(store.approveMember(second.id)).toBe(true)
+    expect(store.members.find(member => member.id === first.id)).toBeUndefined()
+  })
+
   it('tracks a published paper version and removes it when withdrawn', () => {
     const store = useMiniProgramStore()
     expect(store.publicationFor('paper-1')).toBeNull()

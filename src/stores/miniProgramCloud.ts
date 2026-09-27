@@ -104,6 +104,7 @@ export const useMiniProgramCloudStore = defineStore('miniProgramCloud', () => {
     codes.set(result.id, result.code); return result
   })
   const status = (id: string, value: string) => change(async () => { await miniCloud.request('PUT', '/members/' + id, { status: value }); return true })
+  const removeMember = (id: string) => change(async () => { await miniCloud.request('DELETE', '/members/' + id); return true })
   function addMember(_input: { name: string; account: string; inviteId: string }): never {
     throw new Error('成员须从微信小程序提交加入申请')
   }
@@ -111,6 +112,6 @@ export const useMiniProgramCloudStore = defineStore('miniProgramCloud', () => {
     user, title, settings, publications, invites, members, countedMembers, usedQuota, remainingQuota, busy, ready,
     login, logout, refresh, searchWithdrawn, publicationFor, publishPaper, withdrawPaper, createInvite, stopInvite, rotateInvite, addMember,
     approveMember: (id: string) => status(id, 'active'), rejectMember: (id: string) => status(id, 'rejected'),
-    stopMember: (id: string) => status(id, 'stopped'), restoreMember: (id: string) => status(id, 'active'),
+    stopMember: (id: string) => status(id, 'stopped'), restoreMember: (id: string) => status(id, 'active'), removeMember,
   }
 })
