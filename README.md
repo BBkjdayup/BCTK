@@ -8,7 +8,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#获取与使用)
-[![Version](https://img.shields.io/badge/source-v0.1.95-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.95)
+[![Version](https://img.shields.io/badge/source-v0.1.97-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.97)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#技术组成与目录)
 
 <p align="center">
@@ -21,9 +21,9 @@ TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件
 
 项目基于 **Tauri 2 + Vue 3 + TypeScript + Rust + SQLite** 构建，源码采用 **MIT 许可证**。
 
-**[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.95 源码](https://github.com/BBkjdayup/BCTK/tree/v0.1.95) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
+**[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.97 源码](https://github.com/BBkjdayup/BCTK/tree/v0.1.97) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
 
-v0.1.95 源码改进了小程序成员管理：可移除已授权成员以撤销访问并释放名额，套餐暂停或到期的成员也会显示在“已授权”列表。在线操作需要兼容的配套服务。详情见 [v0.1.95 源码说明](docs/releases/v0.1.95.md)；官网安装包版本以[下载页面](https://tktiku.cn/#download)为准。
+v0.1.97 源码汇总了近期的 Word 导入修复：改善根式、分式和上下标的识别与显示，保留填空题中由带下划线空格构成的横线，并减少题目误拆、图片错位及答案归属错误。详情见 [v0.1.97 源码说明](docs/releases/v0.1.97.md)；官网安装包版本以[下载页面](https://tktiku.cn/#download)为准。
 
 ## 一图了解使用流程
 
@@ -56,7 +56,7 @@ flowchart LR
   </tr>
 </table>
 
-截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.95 的实际界面可能有所变化。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
+截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.97 的实际界面可能有所变化。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
 
 ## 从这里开始
 

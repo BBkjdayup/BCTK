@@ -395,7 +395,7 @@ export interface DocxFormulaOccurrence {
   paragraphIndex: number
   textCharOffset: number
   latex: string
-  sourceKind: 'mathtype_mtef5' | 'word_omml'
+  sourceKind: 'mathtype_mtef5' | 'word_omml' | 'word_run_script'
   productVersion: number
   productSubversion: number
 }

@@ -10,9 +10,10 @@ use crate::docx::raw_copy_with_replacements;
 use crate::docx::{
     Diagnostic, DiagnosticSeverity, DocumentTable, DocxError, DocxLimits,
     ExtractedEditableFormulaOccurrence, ExtractedImageOccurrence, ExtractedMathTypeOccurrence,
-    FORMULA_PLACEHOLDER, PackageInspection, PackageKind, RawCopyExport, inspect_docx,
-    raw_copy_with_replacements_and_additions, read_document_from_docx, read_images_from_docx,
-    read_mathtype_from_docx, read_omml_from_docx,
+    FORMULA_PLACEHOLDER, PackageInspection, PackageKind, Paragraph, RawCopyExport, ScriptKind,
+    ScriptRun, inspect_docx, raw_copy_with_replacements_and_additions, read_document_from_docx,
+    read_images_from_docx, read_mathtype_from_docx, read_omml_from_docx,
+    unicode_math_text_to_latex,
 };
 
 #[cfg(test)]
@@ -96,24 +97,25 @@ pub(super) fn prepare_word_import(
             .unwrap_or_else(|| "Word 文档未通过安全与结构检查。".to_owned());
         return Err(CommandError::new("DOCX_IMPORT_ANALYSIS_REJECTED", message));
     }
-    let images = read_images_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
-        let message = diagnostics_from_error(error)
-            .into_iter()
-            .next()
-            .map(|diagnostic| diagnostic.message)
-            .unwrap_or_else(|| "无法安全提取 Word 图片。".to_owned());
-        CommandError::new("DOCX_IMAGE_EXTRACTION_FAILED", message)
-    })?;
-    let tables = read_document_from_docx(Cursor::new(&source_bytes), &limits)
-        .map_err(|error| {
+    let mut images =
+        read_images_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
+            let message = diagnostics_from_error(error)
+                .into_iter()
+                .next()
+                .map(|diagnostic| diagnostic.message)
+                .unwrap_or_else(|| "无法安全提取 Word 图片。".to_owned());
+            CommandError::new("DOCX_IMAGE_EXTRACTION_FAILED", message)
+        })?;
+    let document =
+        read_document_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
             let message = diagnostics_from_error(error)
                 .into_iter()
                 .next()
                 .map(|diagnostic| diagnostic.message)
                 .unwrap_or_else(|| "无法安全提取 Word 表格结构。".to_owned());
             CommandError::new("DOCX_TABLE_EXTRACTION_FAILED", message)
-        })?
-        .tables;
+        })?;
+    let tables = document.tables.clone();
     let native_formulas =
         read_omml_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
             let message = diagnostics_from_error(error)
@@ -133,8 +135,14 @@ pub(super) fn prepare_word_import(
             CommandError::new("DOCX_MATHTYPE_CONVERSION_FAILED", message)
         })?;
     let final_mathtype_offsets = merge_mathtype_occurrences(&mut analysis, &mathtype_formulas)?;
-    let formulas =
+    let mut formulas =
         normalize_formula_occurrences(native_formulas, mathtype_formulas, &final_mathtype_offsets);
+    merge_word_script_runs(
+        &mut analysis,
+        &document.paragraphs,
+        &mut formulas,
+        &mut images,
+    )?;
     Ok(PreparedWordImportSource {
         analysis,
         source_filename,
@@ -243,6 +251,245 @@ fn normalize_formula_occurrences(
     );
     formulas.sort_by_key(|occurrence| (occurrence.paragraph_index, occurrence.text_char_offset));
     formulas
+}
+
+#[derive(Clone, Debug)]
+struct WordScriptReplacement {
+    start: usize,
+    end: usize,
+    latex: String,
+}
+
+fn offset_after_mathtype_insertions(
+    original: usize,
+    final_insertions: &[usize],
+    include_equal: bool,
+) -> usize {
+    let mut result = original;
+    for insertion in final_insertions {
+        if *insertion < result || (include_equal && *insertion == result) {
+            result += 1;
+        }
+    }
+    result
+}
+
+fn preceding_script_base_start(characters: &[char], start: usize, minimum: usize) -> usize {
+    if start <= minimum || start > characters.len() {
+        return start;
+    }
+    let last = characters[start - 1];
+    let opening = match last {
+        ')' => Some('('),
+        '）' => Some('（'),
+        ']' => Some('['),
+        '］' => Some('［'),
+        '}' => Some('{'),
+        _ => None,
+    };
+    if let Some(opening) = opening {
+        let mut depth = 1usize;
+        for index in (minimum..start - 1).rev() {
+            if characters[index] == last {
+                depth += 1;
+            } else if characters[index] == opening {
+                depth -= 1;
+                if depth == 0 {
+                    return index;
+                }
+            }
+        }
+        return start;
+    }
+    if last.is_ascii_digit() {
+        let mut index = start - 1;
+        while index > minimum && characters[index - 1].is_ascii_digit() {
+            index -= 1;
+        }
+        return index;
+    }
+    if last.is_alphanumeric() {
+        start - 1
+    } else {
+        start
+    }
+}
+
+fn offset_after_script_replacements(
+    original: usize,
+    replacements: &[WordScriptReplacement],
+) -> CommandResult<usize> {
+    let mut result = original;
+    for replacement in replacements {
+        if original > replacement.start && original < replacement.end {
+            return Err(CommandError::new(
+                "DOCX_SCRIPT_RESOURCE_OVERLAP",
+                "Word 上下标与图片或公式的位置重叠，无法保证题目正确，已停止导入。",
+            ));
+        }
+        if original >= replacement.end {
+            result = result.saturating_sub(replacement.end - replacement.start - 1);
+        }
+    }
+    Ok(result)
+}
+
+fn merge_word_script_runs(
+    analysis: &mut DocxAnalysisApi,
+    source_paragraphs: &[Paragraph],
+    formulas: &mut Vec<ExtractedEditableFormulaOccurrence>,
+    images: &mut [ExtractedImageOccurrence],
+) -> CommandResult<()> {
+    let mut mathtype_by_paragraph = BTreeMap::<usize, Vec<usize>>::new();
+    for formula in formulas
+        .iter()
+        .filter(|formula| formula.source_kind == "mathtype_mtef5")
+    {
+        mathtype_by_paragraph
+            .entry(formula.paragraph_index)
+            .or_default()
+            .push(formula.text_char_offset);
+    }
+    for positions in mathtype_by_paragraph.values_mut() {
+        positions.sort_unstable();
+    }
+    for image in images.iter_mut() {
+        if let Some(insertions) = mathtype_by_paragraph.get(&image.paragraph_index) {
+            image.text_char_offset =
+                offset_after_mathtype_insertions(image.text_char_offset, insertions, true);
+        }
+    }
+
+    let mut added_formulas = Vec::new();
+    for source in source_paragraphs {
+        if source.script_runs.is_empty() {
+            continue;
+        }
+        let paragraph = analysis.paragraphs.get_mut(source.index).ok_or_else(|| {
+            CommandError::new(
+                "DOCX_SCRIPT_LOCATION_INVALID",
+                "Word 上下标引用了不存在的段落，已停止导入。",
+            )
+        })?;
+        let insertions = mathtype_by_paragraph
+            .get(&source.index)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut runs = source
+            .script_runs
+            .iter()
+            .map(|run| ScriptRun {
+                start_char_offset: offset_after_mathtype_insertions(
+                    run.start_char_offset,
+                    insertions,
+                    true,
+                ),
+                end_char_offset: offset_after_mathtype_insertions(
+                    run.end_char_offset,
+                    insertions,
+                    false,
+                ),
+                kind: run.kind,
+            })
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|run| (run.start_char_offset, run.end_char_offset));
+        let mut merged = Vec::<ScriptRun>::new();
+        for run in runs {
+            if let Some(last) = merged.last_mut()
+                && last.kind == run.kind
+                && last.end_char_offset == run.start_char_offset
+            {
+                last.end_char_offset = run.end_char_offset;
+            } else {
+                merged.push(run);
+            }
+        }
+
+        let mut characters = paragraph.text.chars().collect::<Vec<_>>();
+        let mut replacements = Vec::<WordScriptReplacement>::new();
+        for (index, run) in merged.iter().enumerate().rev() {
+            let start = run.start_char_offset;
+            let end = run.end_char_offset;
+            if start >= end || end > characters.len() {
+                return Err(CommandError::new(
+                    "DOCX_SCRIPT_LOCATION_INVALID",
+                    "Word 上下标在段落中的位置无效，已停止导入。",
+                ));
+            }
+            let minimum = index
+                .checked_sub(1)
+                .and_then(|previous| merged.get(previous))
+                .map(|previous| previous.end_char_offset)
+                .unwrap_or(0);
+            let base_start = preceding_script_base_start(&characters, start, minimum);
+            let base = characters[base_start..start].iter().collect::<String>();
+            let script = characters[start..end].iter().collect::<String>();
+            if script.contains(FORMULA_PLACEHOLDER) || base.contains(FORMULA_PLACEHOLDER) {
+                return Err(CommandError::new(
+                    "DOCX_SCRIPT_RESOURCE_OVERLAP",
+                    "Word 上下标与其他公式重叠，无法保证题目正确，已停止导入。",
+                ));
+            }
+            let base_latex = unicode_math_text_to_latex(&base);
+            let base_latex = if base_latex.is_empty() {
+                "{}"
+            } else {
+                &base_latex
+            };
+            let script_latex = unicode_math_text_to_latex(&script);
+            let latex = match run.kind {
+                ScriptKind::Superscript => format!("{base_latex}^{{{script_latex}}}"),
+                ScriptKind::Subscript => format!("{base_latex}_{{{script_latex}}}"),
+            };
+            characters.splice(base_start..end, [FORMULA_PLACEHOLDER]);
+            replacements.push(WordScriptReplacement {
+                start: base_start,
+                end,
+                latex,
+            });
+        }
+        replacements.sort_by_key(|replacement| replacement.start);
+        for formula in formulas
+            .iter_mut()
+            .filter(|formula| formula.paragraph_index == source.index)
+        {
+            formula.text_char_offset =
+                offset_after_script_replacements(formula.text_char_offset, &replacements)?;
+        }
+        for image in images
+            .iter_mut()
+            .filter(|image| image.paragraph_index == source.index)
+        {
+            image.text_char_offset =
+                offset_after_script_replacements(image.text_char_offset, &replacements)?;
+        }
+        let mut removed_before = 0usize;
+        for replacement in replacements {
+            added_formulas.push(ExtractedEditableFormulaOccurrence {
+                paragraph_index: source.index,
+                text_char_offset: replacement.start - removed_before,
+                latex: replacement.latex,
+                source_kind: "word_run_script".to_owned(),
+                product_version: 0,
+                product_subversion: 0,
+            });
+            removed_before += replacement.end - replacement.start - 1;
+            paragraph.formula_count = paragraph.formula_count.saturating_add(1);
+        }
+        paragraph.text = characters.into_iter().collect();
+    }
+    analysis.formula_count = analysis
+        .formula_count
+        .saturating_add(u32::try_from(added_formulas.len()).unwrap_or(u32::MAX));
+    formulas.extend(added_formulas);
+    formulas.sort_by_key(|formula| (formula.paragraph_index, formula.text_char_offset));
+    analysis.visible_text = analysis
+        .paragraphs
+        .iter()
+        .map(|paragraph| paragraph.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(())
 }
 
 fn analyze_loaded_source(
@@ -1160,6 +1407,70 @@ mod tests {
         .unwrap();
         assert_eq!(value["inputPath"], r"C:\paper.docx");
         assert!(value.get("input_path").is_none());
+    }
+
+    #[test]
+    fn converts_word_run_scripts_to_editable_formulas_and_rebases_later_images() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
+          <w:r><w:t>x</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>2</w:t></w:r>
+          <w:r><w:t> A</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>1</w:t></w:r>
+        </w:p></w:body></w:document>"#;
+        let parsed = crate::docx::parse_document_xml(xml, &DocxLimits::default()).unwrap();
+        let mut analysis = DocxAnalysisApi {
+            source_path: "sample.docx".to_owned(),
+            archive_bytes: 0,
+            package_kind: "document".to_owned(),
+            is_valid: true,
+            visible_text: "x2 A1".to_owned(),
+            paragraph_count: 1,
+            formula_count: 0,
+            part_count: 1,
+            total_uncompressed_bytes: 0,
+            paragraphs: vec![DocxParagraphApi {
+                index: 0,
+                text: "x2 A1".to_owned(),
+                formula_count: 0,
+            }],
+            diagnostics: Vec::new(),
+        };
+        let mut formulas = Vec::new();
+        let mut images = vec![ExtractedImageOccurrence {
+            paragraph_index: 0,
+            text_char_offset: 5,
+            relationship_id: "rId1".to_owned(),
+            original_filename: Some("figure.png".to_owned()),
+            mime_type: "image/png".to_owned(),
+            byte_size: 1,
+            width_px: 1,
+            height_px: 1,
+            bytes: vec![0],
+        }];
+        merge_word_script_runs(
+            &mut analysis,
+            &parsed.paragraphs,
+            &mut formulas,
+            &mut images,
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.paragraphs[0].text,
+            format!("{FORMULA_PLACEHOLDER} {FORMULA_PLACEHOLDER}")
+        );
+        assert_eq!(
+            formulas
+                .iter()
+                .map(|formula| formula.latex.as_str())
+                .collect::<Vec<_>>(),
+            vec!["x^{2}", "A_{1}"]
+        );
+        assert_eq!(
+            formulas
+                .iter()
+                .map(|formula| formula.text_char_offset)
+                .collect::<Vec<_>>(),
+            vec![0, 2]
+        );
+        assert_eq!(images[0].text_char_offset, 3);
     }
 
     /// Opt-in harness for locally supplied compatibility documents. Keeping

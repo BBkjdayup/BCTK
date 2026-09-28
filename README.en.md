@@ -8,7 +8,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#install-on-windows)
-[![Version](https://img.shields.io/badge/source-v0.1.95-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.95)
+[![Version](https://img.shields.io/badge/source-v0.1.97-16a34a)](https://github.com/BBkjdayup/BCTK/tree/v0.1.97)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#architecture-and-data-boundaries)
 
 <p align="center">
@@ -21,9 +21,9 @@ Question data is stored locally in SQLite. Since v0.1.85, all local desktop feat
 
 Built with **Tauri 2, Vue 3, TypeScript, Rust, and SQLite**. Original source code is available under the **MIT License**. The application interface is currently in Chinese.
 
-**[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.95 source tag](https://github.com/BBkjdayup/BCTK/tree/v0.1.95) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
+**[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.97 source tag](https://github.com/BBkjdayup/BCTK/tree/v0.1.97) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
 
-The v0.1.95 source update improves mini-program member management: owners can remove authorized members to revoke access and release their seats, while members affected by a paused or expired plan remain in the authorized list. Online actions require a compatible service. See the [v0.1.95 source notes](docs/releases/v0.1.95.en.md). The version of the official Windows installer is shown on the [download page](https://tktiku.cn/#download).
+The v0.1.97 source update improves Word import: it better preserves roots, fractions, superscripts, and subscripts; keeps fill-in lines made from underlined spaces; and reduces incorrectly split questions, misplaced images, and misassigned answers. See the [v0.1.97 source notes](docs/releases/v0.1.97.en.md). The version of the official Windows installer is shown on the [download page](https://tktiku.cn/#download).
 
 ## Workflow at a glance
 
@@ -56,7 +56,7 @@ The default workflow stays on the local computer. Selected paper content is sent
   </tr>
 </table>
 
-The screenshots were captured from the v0.1.83 browser demo; the actual v0.1.95 interface may differ. The demo uses built-in sample questions and does not access real question-bank files.
+The screenshots were captured from the v0.1.83 browser demo; the actual v0.1.97 interface may differ. The demo uses built-in sample questions and does not access real question-bank files.
 
 ## Start here
 

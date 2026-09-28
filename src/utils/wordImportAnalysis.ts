@@ -35,15 +35,36 @@ export function buildWordAnalysisLines(
   }
 
   const baseLines = new Map<number, WordAnalysisLine>(analysis.paragraphs
-    .map((paragraph) => [paragraph.index, {
-      paragraphIndex: paragraph.index,
-      text: injectWordImportFormulaTokens(
-        paragraph.text,
-        formulasByParagraph.get(paragraph.index) ?? [],
-      ).trim(),
-      images: imagesByParagraph.get(paragraph.index) ?? [],
-      tables: [],
-    }] as const))
+    .map((paragraph) => {
+      const paragraphFormulas = formulasByParagraph.get(paragraph.index) ?? []
+      const originalCharacters = [...paragraph.text]
+      const injected = injectWordImportFormulaTokens(paragraph.text, paragraphFormulas)
+      const leadingTrim = [...injected].length - [...injected.trimStart()].length
+      const trimmed = injected.trim()
+      const trimmedCharacters = [...trimmed]
+      const paragraphImages = (imagesByParagraph.get(paragraph.index) ?? []).map((image) => {
+        const precedingFormulaLength = paragraphFormulas
+          .filter((formula) => formula.textCharOffset < image.textCharOffset)
+          .reduce((total, formula) => {
+            const tokenLength = [...`\uE000${formula.nodeId}\uE001`].length
+            const replacedLength = originalCharacters[formula.textCharOffset] === '\uFFFC' ? 1 : 0
+            return total + tokenLength - replacedLength
+          }, 0)
+        const charOffset = Math.max(0, image.textCharOffset + precedingFormulaLength - leadingTrim)
+        return {
+          ...image,
+          // Option markers use RegExp indices (UTF-16 units), while the DOCX
+          // reader records Unicode character offsets.
+          textCharOffset: trimmedCharacters.slice(0, charOffset).join('').length,
+        }
+      })
+      return [paragraph.index, {
+        paragraphIndex: paragraph.index,
+        text: trimmed,
+        images: paragraphImages,
+        tables: [],
+      }] as const
+    }))
 
   const tableParagraphIndices = new Set<number>()
   const tablesByFirstParagraph = new Map<number, WordAnalysisTable[]>()

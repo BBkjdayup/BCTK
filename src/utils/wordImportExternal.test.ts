@@ -13,6 +13,7 @@ const questionBankExportFixturePath = process.env.ZHITIKU_QUESTION_BANK_EXPORT_A
 const annotatedPhysicsFixturePath = process.env.ZHITIKU_ANNOTATED_PHYSICS_ANALYSIS_JSON?.trim()
 const annotatedPhysicsPreparedFixturePath = process.env.ZHITIKU_ANNOTATED_PHYSICS_PREPARED_JSON?.trim()
 const hundredQuestionsPreparedFixturePath = process.env.ZHITIKU_HUNDRED_QUESTIONS_PREPARED_JSON?.trim()
+const chenghuaMathPreparedFixturePath = process.env.ZHITIKU_CHENGHUA_MATH_PREPARED_JSON?.trim()
 
 function typeCount(questions: readonly RecognizedWordQuestion[], type: QuestionType) {
   return questions.filter((question) => question.type === type).length
@@ -21,6 +22,59 @@ function typeCount(questions: readonly RecognizedWordQuestion[], type: QuestionT
 function lineText(question: RecognizedWordQuestion) {
   return question.stemLines.map((line) => line.text).join('\n')
 }
+
+describe.runIf(Boolean(chenghuaMathPreparedFixturePath))('Chenghua math paper Word import regression', () => {
+  it('combines the original paper with its worked answers and retains math and image options', () => {
+    const fixture = JSON.parse(readFileSync(chenghuaMathPreparedFixturePath!, 'utf8')) as Pick<
+      BeginWordImportResult, 'analysis' | 'images' | 'formulas' | 'tables'
+    >
+    const lines = buildWordAnalysisLines(
+      fixture.analysis, fixture.images, fixture.formulas, fixture.tables,
+    )
+    const questions = recognizeWordQuestions(lines, fallbackQuestionTypes)
+    const formulaText = (question: RecognizedWordQuestion) => buildWordImportRichContent(
+      question.stemLines, fixture.formulas, [], 'stem',
+    ).plainText
+    const optionText = (question: RecognizedWordQuestion) => question.options.map((option) => (
+      buildWordImportRichContent(option, fixture.formulas, [], 'option').plainText
+    ))
+
+    expect(fixture.analysis.isValid).toBe(true)
+    expect(questions).toHaveLength(26)
+    expect(typeCount(questions, 'single_choice')).toBe(8)
+    expect(typeCount(questions, 'fill_blank')).toBe(10)
+    expect(typeCount(questions, 'short_answer')).toBe(8)
+    expect(questions.every((question) => question.answerLines.length > 0)).toBe(true)
+    expect(questions.every((question) => question.explanationLines.length > 0)).toBe(true)
+    expect(optionText(questions[0]!)[0]).toContain('x^{2}')
+    expect(formulaText(questions[3]!)).toContain(String.raw`\frac{2}{x}`)
+    expect(formulaText(questions[8]!)).toContain('x^{|m|}')
+    expect(formulaText(questions[16]!)).toContain(String.raw`\frac{FH}{FE}`)
+    expect(formulaText(questions[22]!)).toContain(String.raw`\sqrt{3}`)
+    expect(formulaText(questions[23]!)).toContain(String.raw`\frac{10x}{x^{2}+4}`)
+    expect(questions[1]?.options.flatMap((option) => option.flatMap((line) => line.images)
+      .map((image) => image.originalFilename))).toEqual([
+      'image2.png', 'image3.png', 'image4.png', 'image5.png',
+    ])
+    expect(lineText(questions[25]!)).not.toContain('参考答案与试题解析')
+    expect(lineText(questions[8]!)).toMatch(/m的值为_{2,}\s*[．。]/u)
+    expect(lineText(questions[19]!)).toMatch(/的值是_{2,}\s*[．。]/u)
+    expect(buildWordImportRichContent(questions[8]!.stemLines, fixture.formulas, [], 'stem').html)
+      .toMatch(/m的值为_{2,}/u)
+    expect(questions[15]?.answerLines.map((line) => line.text).join('\n')).not.toContain('设购进m')
+    expect(questions[15]?.explanationLines.map((line) => line.text).join('\n')).toContain('设购进m')
+
+    const renderingErrors = fixture.formulas.flatMap((formula) => {
+      try {
+        katex.renderToString(formula.latex, { throwOnError: true, strict: false, trust: false })
+        return []
+      } catch (error) {
+        return [{ paragraphIndex: formula.paragraphIndex, latex: formula.latex, error: String(error) }]
+      }
+    })
+    expect(renderingErrors).toEqual([])
+  })
+})
 
 describe.runIf(Boolean(hundredQuestionsPreparedFixturePath))('100-question Word import regression', () => {
   it('keeps every field, image and formula in the 83 fill-in questions', () => {
@@ -52,12 +106,21 @@ describe.runIf(Boolean(hundredQuestionsPreparedFixturePath))('100-question Word 
 
     expect(fixture.analysis.isValid).toBe(true)
     expect(fixture.images).toHaveLength(76)
-    expect(fixture.formulas).toHaveLength(268)
+    expect(fixture.formulas.filter((formula) => formula.sourceKind === 'mathtype_mtef5')).toHaveLength(268)
+    expect(fixture.formulas.filter((formula) => formula.sourceKind === 'word_run_script')).toHaveLength(141)
     expect(converted).toHaveLength(2)
     expect(converted.every((image) => image.mimeType === 'image/png')).toBe(true)
     expect(converted.every((image) => assignedImageIds.has(image.nodeId))).toBe(true)
     expect(assignedImageIds.size).toBe(fixture.images.length)
     expect(assignedFormulaIds.size).toBe(fixture.formulas.length)
+    expect(fixture.formulas.filter((formula) => formula.sourceKind === 'word_run_script').flatMap((formula) => {
+      try {
+        katex.renderToString(formula.latex, { throwOnError: true, strict: false, trust: false })
+        return []
+      } catch (error) {
+        return [{ latex: formula.latex, error: String(error) }]
+      }
+    })).toEqual([])
     // The source contains 83 【答案】 blocks despite its "100题" filename.
     expect(fixture.analysis.paragraphs.filter((paragraph) => paragraph.text.includes('【答案】')))
       .toHaveLength(83)

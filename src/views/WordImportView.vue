@@ -206,7 +206,7 @@ const importSessionId = ref<string | null>(null)
 const pendingImageOccurrences = ref<DocxImageOccurrence[]>([])
 const pendingFormulaOccurrences = ref<DocxFormulaOccurrence[]>([])
 const pendingTableOccurrences = ref<DocxTableOccurrence[]>([])
-const CURRENT_WORD_IMPORT_PARSER_VERSION = 'w1-ooxml-images-formulas-tables-8'
+const CURRENT_WORD_IMPORT_PARSER_VERSION = 'w1-ooxml-images-formulas-tables-10'
 const CURRENT_EXCEL_IMPORT_PARSER_VERSION = 'xlsx-text-v2'
 const parserVersion = ref(CURRENT_WORD_IMPORT_PARSER_VERSION)
 const desktopAvailable = isDesktopRuntime()
@@ -679,9 +679,10 @@ async function startDesktopRecognition(path: string) {
     if (started.images.length) parseLogs.value.push(`已安全提取并登记 ${started.images.length} 个图片位置`)
     if (started.formulas.length) {
       const nativeFormulaCount = started.formulas.filter((formula) => formula.sourceKind === 'word_omml').length
-      const mathtypeFormulaCount = started.formulas.length - nativeFormulaCount
+      const wordScriptCount = started.formulas.filter((formula) => formula.sourceKind === 'word_run_script').length
+      const mathtypeFormulaCount = started.formulas.length - nativeFormulaCount - wordScriptCount
       parseLogs.value.push(
-        `已将 ${mathtypeFormulaCount} 个 MathType 公式和 ${nativeFormulaCount} 个 Word 原生公式转换为可编辑公式`,
+        `已将 ${mathtypeFormulaCount} 个 MathType 公式、${nativeFormulaCount} 个 Word 原生公式和 ${wordScriptCount} 处上下标转换为可编辑公式`,
       )
     }
     if (started.tables.length) parseLogs.value.push(`已保留 ${started.tables.length} 个可编辑 Word 表格`)

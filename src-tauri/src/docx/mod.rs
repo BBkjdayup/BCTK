@@ -26,7 +26,8 @@ mod xml;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};
 pub use document::{
-    DocumentTable, FORMULA_PLACEHOLDER, Paragraph, parse_document_xml, read_document_from_docx,
+    DocumentTable, FORMULA_PLACEHOLDER, Paragraph, ScriptKind, ScriptRun, parse_document_xml,
+    read_document_from_docx,
 };
 pub use error::{DocxError, DocxResult};
 pub use export::{
@@ -37,6 +38,7 @@ pub(crate) use images::inspect_raster_image;
 pub use images::{ExtractedImageOccurrence, read_images_from_docx};
 pub use limits::DocxLimits;
 pub use mathtype::{ExtractedMathTypeOccurrence, read_mathtype_from_docx};
+pub(crate) use omml::unicode_math_text_to_latex;
 pub use omml::{ExtractedEditableFormulaOccurrence, read_omml_from_docx};
 #[cfg(test)]
 pub(crate) use package::test_support::minimal_docx;

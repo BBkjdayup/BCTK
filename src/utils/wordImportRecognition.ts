@@ -82,7 +82,7 @@ interface InlineQuestionFieldMarker {
   prefix: string
 }
 
-const answerHeadingPattern = /^\s*(?:参考答案(?:与|及)评分要点|参考答案及解析|试题参考答案|参考答案与解析|参考答案)\s*[：:]?\s*$/
+const answerHeadingPattern = /^\s*(?:参考答案(?:与|及)评分要点|参考答案(?:与|及)试题(?:解析|详解)|参考答案及解析|试题参考答案|参考答案与解析|参考答案)\s*[：:]?\s*$/
 const explanationHeadingPattern = /^\s*(?:题目解析|试题解析|答案解析|解析)\s*[：:]?\s*$/
 const wrappedFieldPattern = /^\s*[【\[［〖〔（(]\s*([^】\]］〗〕）)]{1,24})\s*[】\]］〗〕）)]\s*[：:]?\s*(.*)$/u
 const answerFieldPattern = /^\s*(参考要点|参考答案|正确答案|标准答案|答案|评分要点|答)\s*[：:]\s*(.*)$/u
@@ -670,7 +670,11 @@ function buildQuestion(
   let returnedToStem = false
 
   for (const line of raw.lines) {
-    const inlineField = parseInlineQuestionField(line.text)
+    // A concluding "答：" inside 【解答】 is part of the worked solution. It
+    // must not switch the remaining solution back into the answer field.
+    const solutionConclusion: boolean = inlineSection === 'explanation' && /^\s*答\s*[：:]/u.test(line.text)
+    const inlineField: InlineQuestionFieldMarker | null = solutionConclusion
+      ? null : parseInlineQuestionField(line.text)
     if (inlineField) {
       inlineSection = inlineField.field
       const content = inlineFieldText(inlineField)
@@ -714,7 +718,8 @@ function buildQuestion(
     .map((entry) => entry.lines)
   const hasStemImage = stemLines.some((line) => line.images.length)
   const hasTextOptions = options.some((option) => option.some((line) => line.text.trim()))
-  if (raw.section === 'choice' && hasStemImage && !hasTextOptions) {
+  const hasOptionImages = options.some((option) => option.some((line) => line.images.length))
+  if (raw.section === 'choice' && hasStemImage && !hasTextOptions && !hasOptionImages) {
     const paragraphIndex = stemLines[0]?.paragraphIndex ?? raw.lines[0]?.paragraphIndex ?? -1
     options = ['A', 'B', 'C', 'D'].map((label) => [{
       paragraphIndex,
@@ -761,7 +766,13 @@ export function recognizeWordQuestions(
   const explanationHeadingIndex = normalizedLines.findIndex((line) => explanationHeadingPattern.test(line.text))
   const supplementalHeadingIndices = [answerHeadingIndex, explanationHeadingIndex].filter((index) => index >= 0)
   const bodyEnd = supplementalHeadingIndices.length ? Math.min(...supplementalHeadingIndices) : normalizedLines.length
-  const bodyLines = normalizedLines.slice(0, bodyEnd)
+  let bodyLines = normalizedLines.slice(0, bodyEnd)
+  // Some printed papers repeat their title immediately before the answer
+  // chapter. That title belongs to neither the last question nor its answer.
+  if (answerHeadingIndex >= 0 && bodyLines.length > 1
+    && bodyLines[bodyLines.length - 1]?.text === normalizedLines[0]?.text) {
+    bodyLines = bodyLines.slice(0, -1)
+  }
   const answerEnd = explanationHeadingIndex > answerHeadingIndex
     ? explanationHeadingIndex
     : normalizedLines.length
@@ -777,6 +788,24 @@ export function recognizeWordQuestions(
   const rawQuestions = parseBody(bodyLines, definitions)
   const answers = parseAnswers(answerLines, rawQuestions)
   const explanations = parseExplanations(explanationLines, rawQuestions)
+  // A worked-answer chapter often repeats each numbered question before
+  // 【答案】【分析】【解答】. Keep the original paper's stem and options, and take
+  // only the annotated answer and explanation from its matching block.
+  if (answerHeadingIndex >= 0) {
+    for (const answerBlock of parseBody(answerLines, definitions)) {
+      if (answerBlock.sourceNumber === null
+        || !answerBlock.lines.some((line) => parseInlineQuestionField(line.text))) continue
+      const matches = rawQuestions.filter((question) => question.sourceNumber === answerBlock.sourceNumber
+        && (question.section === answerBlock.section || answerBlock.section === null))
+      if (matches.length !== 1) continue
+      const original = matches[0]
+      if (!original) continue
+      const annotated = buildQuestion(answerBlock, new Map(), new Map())
+      const key = answerKey(original.section, answerBlock.sourceNumber)
+      if (annotated.answerLines.length) answers.set(key, annotated.answerLines)
+      if (annotated.explanationLines.length) explanations.set(key, annotated.explanationLines)
+    }
+  }
   return rawQuestions.map((question) => {
     const recognized = buildQuestion(question, answers, explanations)
     if (question.explicitType && !recognized.unknownTypeName) {

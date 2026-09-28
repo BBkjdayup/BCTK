@@ -6447,7 +6447,7 @@ dependencies = [
 
 [[package]]
 name = "zhitiku-desktop"
-version = "0.1.95"
+version = "0.1.97"
 dependencies = [
  "base64 0.22.1",
  "calamine",

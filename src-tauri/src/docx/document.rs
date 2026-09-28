@@ -6,7 +6,7 @@ use zip::ZipArchive;
 use super::{
     ByteSpan, Diagnostic, DocxError, DocxLimits, DocxResult,
     package::{archive_size_diagnostic, inspect_archive_with_size, read_part_limited},
-    xml::{NamespaceKind, classify_namespace, decode_reference, local_name},
+    xml::{NamespaceKind, attribute_value, classify_namespace, decode_reference, local_name},
 };
 
 const DOCUMENT_PART: &str = "word/document.xml";
@@ -37,6 +37,21 @@ pub struct Paragraph {
     pub source_span: ByteSpan,
     /// Indices into [`ParsedDocument::math_fragments`].
     pub math_fragment_indices: Vec<usize>,
+    /// Word text runs whose visual script is not represented by OMML.
+    pub script_runs: Vec<ScriptRun>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScriptKind {
+    Superscript,
+    Subscript,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScriptRun {
+    pub start_char_offset: usize,
+    pub end_char_offset: usize,
+    pub kind: ScriptKind,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -63,6 +78,14 @@ struct ParagraphBuilder {
     start: usize,
     logical_text: String,
     math_fragment_indices: Vec<usize>,
+    script_runs: Vec<ScriptRun>,
+}
+
+#[derive(Debug)]
+struct RunCapture {
+    start_char_offset: usize,
+    script_kind: Option<ScriptKind>,
+    underlined: bool,
 }
 
 #[derive(Debug)]
@@ -121,6 +144,7 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
     let mut buffer = Vec::new();
     let mut result = ParsedDocument::default();
     let mut paragraph: Option<ParagraphBuilder> = None;
+    let mut run_capture: Option<RunCapture> = None;
     let mut paragraph_depth = 0usize;
     let mut math_capture: Option<MathCapture> = None;
     let mut xml_depth = 0usize;
@@ -201,6 +225,25 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                 if namespace == NamespaceKind::Word {
                     match local.as_slice() {
                         b"document" => saw_document_root = true,
+                        b"r" if excluded_depth == 0 && instruction_depth == 0 => {
+                            if let Some(paragraph) = paragraph.as_ref() {
+                                run_capture = Some(RunCapture {
+                                    start_char_offset: paragraph.logical_text.chars().count(),
+                                    script_kind: None,
+                                    underlined: false,
+                                });
+                            }
+                        }
+                        b"u" => {
+                            if let Some(run) = run_capture.as_mut() {
+                                run.underlined = word_underline_enabled(&reader, start)?;
+                            }
+                        }
+                        b"vertAlign" => {
+                            if let Some(run) = run_capture.as_mut() {
+                                run.script_kind = word_script_kind(&reader, start)?;
+                            }
+                        }
                         b"tbl" => {
                             table_depth += 1;
                             if table_depth == 1 {
@@ -225,6 +268,7 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                                 start: event_start,
                                 logical_text: String::new(),
                                 math_fragment_indices: Vec::new(),
+                                script_runs: Vec::new(),
                             });
                             paragraph_depth = 1;
                         }
@@ -302,11 +346,20 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                             logical_text: String::new(),
                             source_span: ByteSpan::new(event_start, event_end),
                             math_fragment_indices: Vec::new(),
+                            script_runs: Vec::new(),
                         });
                         if table_depth > 0
                             && let Some(cell) = table_cell.as_mut()
                         {
                             cell.paragraph_indices.push(paragraph_index);
+                        }
+                    } else if local == b"vertAlign" {
+                        if let Some(run) = run_capture.as_mut() {
+                            run.script_kind = word_script_kind(&reader, start)?;
+                        }
+                    } else if local == b"u" {
+                        if let Some(run) = run_capture.as_mut() {
+                            run.underlined = word_underline_enabled(&reader, start)?;
                         }
                     } else if excluded_depth == 0
                         && instruction_depth == 0
@@ -361,6 +414,29 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
 
                 if namespace == NamespaceKind::Word {
                     match local.as_slice() {
+                        b"r" => {
+                            if let (Some(run), Some(paragraph)) =
+                                (run_capture.take(), paragraph.as_mut())
+                            {
+                                let end_char_offset = paragraph.logical_text.chars().count();
+                                if run.underlined {
+                                    preserve_underlined_blank(
+                                        &mut paragraph.logical_text,
+                                        run.start_char_offset,
+                                        end_char_offset,
+                                    );
+                                }
+                                if let Some(kind) = run.script_kind
+                                    && end_char_offset > run.start_char_offset
+                                {
+                                    paragraph.script_runs.push(ScriptRun {
+                                        start_char_offset: run.start_char_offset,
+                                        end_char_offset,
+                                        kind,
+                                    });
+                                }
+                            }
+                        }
                         b"t" => text_depth = text_depth.saturating_sub(1),
                         b"instrText" => instruction_depth = instruction_depth.saturating_sub(1),
                         b"del" | b"moveFrom" => excluded_depth = excluded_depth.saturating_sub(1),
@@ -386,6 +462,7 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                                 logical_text: paragraph.logical_text,
                                 source_span: ByteSpan::new(paragraph.start, event_end),
                                 math_fragment_indices: paragraph.math_fragment_indices,
+                                script_runs: paragraph.script_runs,
                             });
                             if table_depth > 0
                                 && let Some(cell) = table_cell.as_mut()
@@ -541,6 +618,55 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
     Ok(result)
 }
 
+fn word_script_kind(
+    reader: &NsReader<&[u8]>,
+    start: &quick_xml::events::BytesStart<'_>,
+) -> DocxResult<Option<ScriptKind>> {
+    Ok(
+        match attribute_value(
+            reader,
+            start,
+            b"val",
+            Some(NamespaceKind::Word),
+            DOCUMENT_PART,
+        )?
+        .as_deref()
+        {
+            Some("superscript") => Some(ScriptKind::Superscript),
+            Some("subscript") => Some(ScriptKind::Subscript),
+            _ => None,
+        },
+    )
+}
+
+fn word_underline_enabled(
+    reader: &NsReader<&[u8]>,
+    start: &quick_xml::events::BytesStart<'_>,
+) -> DocxResult<bool> {
+    let value = attribute_value(
+        reader,
+        start,
+        b"val",
+        Some(NamespaceKind::Word),
+        DOCUMENT_PART,
+    )?;
+    Ok(!matches!(value.as_deref(), Some("none" | "false" | "0")))
+}
+
+fn preserve_underlined_blank(text: &mut String, start: usize, end: usize) {
+    if start >= end {
+        return;
+    }
+    let mut characters = text.chars().collect::<Vec<_>>();
+    if characters.get(start..end).is_some_and(|run| {
+        run.iter()
+            .all(|character| matches!(character, ' ' | '\u{3000}' | '\u{00a0}'))
+    }) {
+        characters[start..end].fill('_');
+        *text = characters.into_iter().collect();
+    }
+}
+
 fn ensure_xml_depth(depth: usize, limits: &DocxLimits) -> DocxResult<()> {
     if depth > limits.max_xml_depth {
         Err(DocxError::LimitExceeded {
@@ -585,6 +711,47 @@ mod tests {
             b"<m:oMath><m:r><m:t>x</m:t></m:r></m:oMath>"
         );
         assert_eq!(parsed.paragraphs[0].math_fragment_indices, vec![0]);
+    }
+
+    #[test]
+    fn records_formatted_word_scripts_without_confusing_them_with_omml() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p>
+          <w:r><w:t>x</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>2</w:t></w:r>
+          <w:r><w:t>+a</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="subscript"/></w:rPr><w:t>1</w:t></w:r>
+        </w:p></w:body></w:document>"#;
+        let parsed = parse_document_xml(xml, &DocxLimits::default()).unwrap();
+        assert_eq!(parsed.paragraphs[0].logical_text, "x2+a1");
+        assert_eq!(
+            parsed.paragraphs[0].script_runs,
+            vec![
+                ScriptRun {
+                    start_char_offset: 1,
+                    end_char_offset: 2,
+                    kind: ScriptKind::Superscript
+                },
+                ScriptRun {
+                    start_char_offset: 4,
+                    end_char_offset: 5,
+                    kind: ScriptKind::Subscript
+                },
+            ]
+        );
+        assert!(parsed.math_fragments.is_empty());
+    }
+
+    #[test]
+    fn preserves_word_underlined_blanks_without_changing_math_offsets_or_answer_text() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>
+          <w:p><w:r><w:t>m的值为</w:t></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t xml:space="preserve">　    　</w:t></w:r><m:oMath><m:r><m:t>x</m:t></m:r></m:oMath></w:p>
+          <w:p><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>﹣2</w:t></w:r><w:r><w:rPr><w:u w:val="none"/></w:rPr><w:t xml:space="preserve">  </w:t></w:r></w:p>
+        </w:body></w:document>"#;
+        let parsed = parse_document_xml(xml.as_bytes(), &DocxLimits::default()).unwrap();
+        assert_eq!(
+            parsed.paragraphs[0].logical_text,
+            format!("m的值为______{FORMULA_PLACEHOLDER}")
+        );
+        assert_eq!(parsed.math_fragments[0].text_char_offset, Some(10));
+        assert_eq!(parsed.paragraphs[1].logical_text, "﹣2  ");
     }
 
     #[test]

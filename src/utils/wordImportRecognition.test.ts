@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import type { DocxImageOccurrence, QuestionType, QuestionTypeDefinition } from '../types/domain'
+import type { DocxAnalysis, DocxFormulaOccurrence, DocxImageOccurrence, QuestionType, QuestionTypeDefinition } from '../types/domain'
 import { fallbackQuestionTypes } from './questionTypes'
+import { buildWordAnalysisLines } from './wordImportAnalysis'
 import {
   recognizeWordQuestions,
   type WordAnalysisLine,
@@ -548,5 +549,70 @@ describe('Word question recognition compatibility', () => {
       ['甲'],
       ['乙'],
     ])
+  })
+
+  it('takes stems from the original paper and fields from a repeated worked-answer chapter', () => {
+    const builder = lineBuilder()
+    builder.add('数学期末试卷')
+    builder.add('一、选择题')
+    builder.add('1．下列图形正确的是？')
+    builder.add('A．甲 B．乙 C．丙 D．丁')
+    builder.add('二、填空题')
+    builder.add('2．m 的值为　   　．')
+    builder.add('数学期末试卷')
+    builder.add('参考答案与试题解析')
+    builder.add('一、选择题')
+    builder.add('1．下列图形正确的是？')
+    builder.add('A．甲 B．乙 C．丙 D．丁')
+    builder.add('【答案】B')
+    builder.add('【解答】根据定义可得乙。')
+    builder.add('答：选乙。')
+    builder.add('二、填空题')
+    builder.add('2．m 的值为　﹣2　．')
+    builder.add('【答案】﹣2')
+    builder.add('【分析】先列式。')
+
+    const questions = recognizeWordQuestions(builder.lines)
+    expect(questions).toHaveLength(2)
+    expect(questions[0]?.stemLines.map((line) => line.text).join('')).toBe('下列图形正确的是？')
+    expect(questions[0]?.answerLines.map((line) => line.text)).toEqual(['B'])
+    expect(questions[0]?.explanationLines.map((line) => line.text)).toEqual([
+      '根据定义可得乙。', '答：选乙。',
+    ])
+    expect(questions[1]?.stemLines.map((line) => line.text).join('')).toBe('m 的值为　   　．')
+    expect(questions[1]?.answerLines.map((line) => line.text)).toEqual(['﹣2'])
+  })
+
+  it('keeps image-only A-D options when a question also has a stem image', () => {
+    const builder = lineBuilder()
+    builder.add('一、选择题')
+    builder.add('1．左视图是？')
+    builder.add('', [imageOccurrence('stem', 2, 0)])
+    builder.add('A．\tB．\tC．\tD．', [
+      imageOccurrence('a', 3, 2), imageOccurrence('b', 3, 5),
+      imageOccurrence('c', 3, 8), imageOccurrence('d', 3, 11),
+    ])
+    const [question] = recognizeWordQuestions(builder.lines)
+    expect(question?.options.flatMap((option) => option.flatMap((line) => line.images)
+      .map((image) => image.originalFilename))).toEqual(['a.png', 'b.png', 'c.png', 'd.png'])
+  })
+
+  it('adjusts image positions after leading tabs and formula-token insertion', () => {
+    const formula: DocxFormulaOccurrence = {
+      nodeId: '10000000-0000-4000-8000-000000000001', paragraphIndex: 0,
+      textCharOffset: 4, latex: 'x^{2}', sourceKind: 'word_omml',
+      productVersion: 0, productSubversion: 0,
+    }
+    const analysis: DocxAnalysis = {
+      sourcePath: 'sample.docx', archiveBytes: 0, packageKind: 'document', isValid: true,
+      visibleText: '', paragraphCount: 1, formulaCount: 1, partCount: 0,
+      totalUncompressedBytes: 0, diagnostics: [],
+      paragraphs: [{ index: 0, text: '\t\tA．\uFFFC\tB．', formulaCount: 1 }],
+    }
+    const [line] = buildWordAnalysisLines(analysis, [imageOccurrence('a', 0, 4),
+      imageOccurrence('b', 0, 7)], [formula], [])
+    expect(line?.text.startsWith('A．')).toBe(true)
+    expect(line?.images[0]?.textCharOffset).toBe(2)
+    expect(line?.images[1]?.textCharOffset).toBeGreaterThan(7)
   })
 })
