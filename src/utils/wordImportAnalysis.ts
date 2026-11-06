@@ -75,6 +75,9 @@ export function buildWordAnalysisLines(
     if (firstParagraphIndex === undefined) continue
     paragraphIndices.forEach((index) => tableParagraphIndices.add(index))
     const analysisTable: WordAnalysisTable = {
+      ...(table.widthPx ? { widthPx: table.widthPx } : {}),
+      ...(table.columnWidthsPx?.length ? { columnWidthsPx: table.columnWidthsPx } : {}),
+      ...(table.rowMinHeightsPx?.some(Boolean) ? { rowMinHeightsPx: table.rowMinHeightsPx } : {}),
       rows: table.rows.map((row) => row.map((cell) => ({
         lines: cell.paragraphIndices
           .map((index) => baseLines.get(index))

@@ -18,11 +18,11 @@ use sha2::{Digest, Sha256};
 
 use crate::docx::{
     Diagnostic, DocxError, DocxLimits, PackageKind, TemplateAnchor, TemplatePackageAnalysis,
-    analyze_template_package_with_requirements, read_mathtype_from_docx,
+    analyze_template_package_with_requirements, prepare_template_source, read_mathtype_from_docx,
 };
 
 pub(crate) const TEMPLATE_ANALYSIS_SCHEMA_VERSION: u32 = 1;
-pub(crate) const TEMPLATE_PARSER_VERSION: &str = "w1-opc-1";
+pub(crate) const TEMPLATE_PARSER_VERSION: &str = "w1-opc-2";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ManagedTemplateFileMetadata {
@@ -141,9 +141,9 @@ impl From<DocxError> for ManagedTemplateError {
     }
 }
 
-/// Analyzes and imports exactly the same bounded bytes. Invalid or ambiguous
-/// templates return `Ok(imported = false)` with diagnostics and never create a
-/// managed file.
+/// Prepares a bounded import copy, then analyzes and stores those exact bytes.
+/// The external source is never changed. Invalid or ambiguous templates return
+/// `Ok(imported = false)` with diagnostics and never create a managed file.
 pub(crate) fn import_managed_template(
     source_path: &Path,
     templates_dir: &Path,
@@ -191,30 +191,30 @@ pub(crate) fn import_managed_template(
     }
 
     let bytes = read_bounded_source(&canonical_source, source_metadata.len(), limits)?;
-    let mathtype_formula_count = if limits.allow_mathtype_ole {
-        read_mathtype_from_docx(Cursor::new(&bytes), limits)
-            .map_err(|error| ManagedTemplateError::InvalidSource {
-                code: "TEMPLATE_EMBEDDED_OBJECT_UNSUPPORTED",
-                message: format!(
-                    "模板包含无法安全处理的嵌入对象。模板导入只支持能够完整解析的 MathType 公式：{error}"
-                ),
-            })?
-            .len()
-    } else {
-        0
+    let (bytes, detached_template) = match prepare_template_source(bytes, limits) {
+        Ok(prepared) => prepared,
+        Err(DocxError::Rejected { diagnostics }) => {
+            return Ok(rejected_import(
+                original_file_name,
+                TemplatePackageAnalysis {
+                    archive_bytes: source_metadata.len(),
+                    diagnostics,
+                    ..TemplatePackageAnalysis::default()
+                },
+            ));
+        }
+        Err(error) => return Err(error.into()),
     };
     let mut analysis = analyze_template_package_with_requirements(
         Cursor::new(&bytes),
         required_anchor_names,
         limits,
     )?;
-    if mathtype_formula_count > 0 {
+    if detached_template {
         analysis.diagnostics.push(Diagnostic::warning(
-            "TEMPLATE_MATHTYPE_REQUIRES_CONFIGURATION",
-            Some("word/document.xml"),
-            format!(
-                "检测到 {mathtype_formula_count} 个 MathType 公式。请在“调整区域”中完整选择试题范围；保存正式模板时会删除这些 OLE 对象。"
-            ),
+            "TEMPLATE_ATTACHED_TEMPLATE_REMOVED",
+            Some("word/settings.xml"),
+            "已解除旧 Word 模板关联，保留文档现有内容和样式；原文件未修改。",
         ));
     }
     let expected_kind = match source_extension {
@@ -234,6 +234,39 @@ pub(crate) fn import_managed_template(
     }
     if !analysis.is_acceptable() {
         return Ok(rejected_import(original_file_name, analysis));
+    }
+
+    // General package/anchor errors must be reported before MathType extraction,
+    // otherwise ordinary DOCX problems are mislabeled as embedded-object errors.
+    let mathtype_formula_count = if limits.allow_mathtype_ole {
+        read_mathtype_from_docx(Cursor::new(&bytes), limits)
+            .map_err(|error| {
+                if matches!(&error, DocxError::Xml { part_name, .. }
+                    if part_name == "MathType Equation Native"
+                        || part_name.starts_with("word/embeddings/"))
+                {
+                    ManagedTemplateError::InvalidSource {
+                        code: "TEMPLATE_EMBEDDED_OBJECT_UNSUPPORTED",
+                        message: format!(
+                            "模板包含无法安全处理的嵌入对象。模板导入只支持能够完整解析的 MathType 公式：{error}"
+                        ),
+                    }
+                } else {
+                    ManagedTemplateError::Docx(error)
+                }
+            })?
+            .len()
+    } else {
+        0
+    };
+    if mathtype_formula_count > 0 {
+        analysis.diagnostics.push(Diagnostic::warning(
+            "TEMPLATE_MATHTYPE_REQUIRES_CONFIGURATION",
+            Some("word/document.xml"),
+            format!(
+                "检测到 {mathtype_formula_count} 个 MathType 公式。请在“调整区域”中完整选择试题范围；保存正式模板时会删除这些 OLE 对象。"
+            ),
+        ));
     }
 
     let digest: [u8; 32] = Sha256::digest(&bytes).into();
@@ -718,11 +751,22 @@ fn is_lowercase_uuid_v7(stem: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, io::Write};
+    use std::{
+        collections::BTreeMap,
+        env,
+        io::{Read, Write},
+    };
 
-    use zip::{ZipWriter, write::SimpleFileOptions};
+    use zip::{ZipArchive, ZipWriter, write::SimpleFileOptions};
 
     use super::*;
+    use crate::docx::{
+        DocxLimits, PaperContentMode, PaperRichDocument, PaperRichItem,
+        TemplateRegionConfiguration, TemplateRegionPlacement, TemplateStyleSelection,
+        analyze_template_package, configure_template_package, inspect_docx, parse_document_xml,
+        parse_rich_content, preview_template_configuration, raw_copy_with_replacements,
+        render_rich_paper_document_xml_with_styles,
+    };
 
     const DOCUMENT: &str = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
 <w:body><w:p><w:r><w:t>{{ZT_QUESTIONS}}</w:t></w:r></w:p></w:body></w:document>"#;
@@ -811,6 +855,223 @@ mod tests {
             writer.write_all(bytes).unwrap();
         }
         writer.finish().unwrap().into_inner()
+    }
+
+    fn template_reference_fixture(extra_relationship: &str) -> Vec<u8> {
+        let document = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>试卷标题</w:t></w:r></w:p><w:p><w:r><w:t>旧题目</w:t></w:r></w:p><w:sectPr/></w:body></w:document>"#;
+        let settings = r#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:attachedTemplate r:id="old"/></w:settings>"#;
+        let relationships = format!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="old" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate" Target="file:///D:/missing.dot" TargetMode="External"/>{extra_relationship}</Relationships>"#
+        );
+        let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, bytes) in [
+            ("[Content_Types].xml", CONTENT_TYPES.as_bytes()),
+            ("_rels/.rels", ROOT_RELS.as_bytes()),
+            ("word/document.xml", document.as_bytes()),
+            ("word/settings.xml", settings.as_bytes()),
+            ("word/_rels/settings.xml.rels", relationships.as_bytes()),
+        ] {
+            writer
+                .start_file(name, SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
+    fn zip_parts(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+        let mut archive = ZipArchive::new(Cursor::new(bytes)).unwrap();
+        let mut parts = BTreeMap::new();
+        for index in 0..archive.len() {
+            let mut file = archive.by_index(index).unwrap();
+            let mut content = Vec::new();
+            file.read_to_end(&mut content).unwrap();
+            parts.insert(file.name().to_owned(), content);
+        }
+        parts
+    }
+
+    fn import_configure_export_detached_template(source: &Path) -> Vec<u8> {
+        let original = fs::read(source).unwrap();
+        let workspace = TestWorkspace::new();
+        let templates = workspace.0.join("templates");
+        let result = import_managed_template(source, &templates, &[], &mathtype_limits()).unwrap();
+        assert!(result.imported, "{:?}", result.diagnostics);
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|item| item.code == "TEMPLATE_ATTACHED_TEMPLATE_REMOVED")
+        );
+        assert!(result.anchors.is_empty());
+        let file = result.file.unwrap();
+        let prepared = read_verified_managed_template(
+            &templates,
+            &file.managed_file_name,
+            file.file_byte_size,
+            &file.file_sha256,
+            &mathtype_limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(source).unwrap(),
+            original,
+            "the original must never be edited"
+        );
+        assert_ne!(prepared, original);
+        assert_eq!(result.archive_bytes, prepared.len() as u64);
+        let original_parts = zip_parts(&original);
+        let prepared_parts = zip_parts(&prepared);
+        assert_eq!(
+            original_parts.keys().collect::<Vec<_>>(),
+            prepared_parts.keys().collect::<Vec<_>>()
+        );
+        for (name, bytes) in &original_parts {
+            if !matches!(
+                name.as_str(),
+                "word/settings.xml" | "word/_rels/settings.xml.rels"
+            ) {
+                assert_eq!(prepared_parts.get(name), Some(bytes), "{name} changed");
+            }
+        }
+
+        let limits = DocxLimits::default();
+        let preview = preview_template_configuration(&prepared, &limits).unwrap();
+        assert!(preview.paragraphs.len() >= 2);
+        let configured = configure_template_package(
+            &prepared,
+            &TemplateRegionConfiguration {
+                questions: TemplateRegionPlacement::ReplaceRange {
+                    start_paragraph: 1,
+                    end_paragraph: preview.paragraphs.last().unwrap().index,
+                },
+                title: Some(TemplateRegionPlacement::ReplaceParagraph(0)),
+                styles: TemplateStyleSelection::default(),
+            },
+            &limits,
+        )
+        .unwrap();
+        let stored =
+            store_configured_managed_template(&configured.bytes, &templates, &limits).unwrap();
+        let configured_bytes = read_verified_managed_template(
+            &templates,
+            &stored.file.managed_file_name,
+            stored.file.file_byte_size,
+            &stored.file.file_sha256,
+            &limits,
+        )
+        .unwrap();
+        let analysis = analyze_template_package(Cursor::new(&configured_bytes), &limits).unwrap();
+        assert!(analysis.is_acceptable());
+        let paper = PaperRichDocument {
+            title: "解除关联回归试卷".to_owned(),
+            mode: PaperContentMode::PaperOnly,
+            omit_empty_field_placeholders: false,
+            items: vec![PaperRichItem {
+                question_type: "single_choice".to_owned(),
+                question_type_label: "单选题".to_owned(),
+                stem: parse_rich_content("<p>新的回归试题</p>", "新的回归试题").content,
+                options: vec![parse_rich_content("<p>选项甲</p>", "选项甲").content],
+                answer: Default::default(),
+                explanation: Default::default(),
+            }],
+        };
+        let rendered = render_rich_paper_document_xml_with_styles(
+            analysis.document_xml.as_ref().unwrap(),
+            &paper,
+            &BTreeMap::new(),
+            configured.style_profile.as_ref(),
+            &limits,
+        )
+        .unwrap();
+        let exported = raw_copy_with_replacements(
+            Cursor::new(&configured_bytes),
+            Cursor::new(Vec::new()),
+            &BTreeMap::from([("word/document.xml".to_owned(), rendered.document_xml)]),
+            &limits,
+        )
+        .unwrap()
+        .output
+        .into_inner();
+        inspect_docx(Cursor::new(&exported), &limits)
+            .unwrap()
+            .ensure_acceptable()
+            .unwrap();
+        let exported_parts = zip_parts(&exported);
+        for (name, bytes) in &prepared_parts {
+            if name != "word/document.xml" {
+                assert_eq!(
+                    exported_parts.get(name),
+                    Some(bytes),
+                    "{name} changed during export"
+                );
+            }
+        }
+        let parsed = parse_document_xml(&exported_parts["word/document.xml"], &limits).unwrap();
+        let text = parsed
+            .paragraphs
+            .iter()
+            .map(|paragraph| paragraph.logical_text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("新的回归试题"));
+        assert!(text.contains("解除关联回归试卷"));
+        assert!(!text.contains("旧题目"));
+        assert!(!text.contains("ZT_QUESTIONS"));
+        exported
+    }
+
+    #[test]
+    fn detached_template_import_configure_and_export_preserve_the_source() {
+        let workspace = TestWorkspace::new();
+        let source = workspace.0.join("old-template.docx");
+        fs::write(&source, template_reference_fixture("")).unwrap();
+        import_configure_export_detached_template(&source);
+    }
+
+    #[test]
+    #[ignore = "set TK_TEMPLATE_IMPORT_DOCX to an external regression document"]
+    fn supplied_template_import_configure_and_export() {
+        let source = env::var_os("TK_TEMPLATE_IMPORT_DOCX").expect("fixture path required");
+        let exported = import_configure_export_detached_template(Path::new(&source));
+        if let Some(output) = env::var_os("TK_TEMPLATE_EXPORT_OUTPUT") {
+            fs::write(output, exported).unwrap();
+        }
+    }
+
+    #[test]
+    fn package_errors_keep_the_real_diagnostics_and_create_no_managed_file() {
+        let workspace = TestWorkspace::new();
+        let source = workspace.0.join("external-image.docx");
+        let templates = workspace.0.join("templates");
+        let extra = r#"<Relationship Id="img" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="https://invalid.example/image" TargetMode="External"/>"#;
+        fs::write(&source, template_reference_fixture(extra)).unwrap();
+        let result = import_managed_template(&source, &templates, &[], &mathtype_limits()).unwrap();
+        assert!(!result.imported);
+        assert!(result.file.is_none());
+        assert!(!templates.exists());
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.code == "DOCX_EXTERNAL_RELATIONSHIP")
+            .unwrap();
+        assert!(diagnostic.message.contains("外部引用"));
+        assert!(!diagnostic.message.contains("MathType"));
+    }
+
+    #[test]
+    fn plain_template_without_relationships_does_not_require_mathtype() {
+        let workspace = TestWorkspace::new();
+        let source = workspace.0.join("plain.docx");
+        fs::write(&source, minimal_docx()).unwrap();
+        let result = import_managed_template(
+            &source,
+            &workspace.0.join("templates"),
+            &[],
+            &mathtype_limits(),
+        )
+        .unwrap();
+        assert!(result.imported, "{:?}", result.diagnostics);
     }
 
     #[test]

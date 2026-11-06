@@ -119,9 +119,17 @@ pub(super) fn inspect_workbook(input_path: String) -> CommandResult<ExcelWorkboo
     })
 }
 
+#[cfg(test)]
 pub(super) fn prepare_import(
     request: ExcelImportRequestApi,
 ) -> CommandResult<PreparedExcelImportSource> {
+    prepare_import_with_task(request, &super::tasks::Context::default())
+}
+pub(super) fn prepare_import_with_task(
+    request: ExcelImportRequestApi,
+    task: &super::tasks::Context,
+) -> CommandResult<PreparedExcelImportSource> {
+    task.checkpoint("检查 Excel 文件结构", 0, None)?;
     let loaded = load_workbook(&request.input_path)?;
     let mut workbook = open_xlsx(&loaded.bytes)?;
     let sheet_names = safe_sheet_names(&workbook)?;
@@ -135,6 +143,7 @@ pub(super) fn prepare_import(
             })?,
         _ => default_sheet_name(&sheet_names).to_owned(),
     };
+    task.checkpoint("读取 Excel 工作表", 0, None)?;
     let range = workbook
         .worksheet_range(&selected_sheet_name)
         .map_err(|error| {
@@ -183,6 +192,9 @@ pub(super) fn prepare_import(
     let mut parsed_rows = Vec::new();
     let mut source_item_count = 0usize;
     for (offset, row) in rows.iter().enumerate().skip(header_index + 1) {
+        if offset % 32 == 0 {
+            task.checkpoint("识别 Excel 题目行", offset, Some(rows.len()))?;
+        }
         let question_type = cell_at(row, headers.question_type);
         let subject_name = cell_at(row, headers.subject);
         let chapter_name = cell_at(row, headers.chapter);

@@ -394,18 +394,26 @@ mod tests {
         ))
     }
 
-    fn remove_test_root(root: &std::path::Path) {
-        let mut cleanup_error = None;
-        for _ in 0..10 {
+    async fn remove_test_root(root: &std::path::Path) {
+        // Let pending SQLite cleanup tasks run while Windows releases handles.
+        // Only transient sharing violations receive a bounded retry.
+        let mut delays = [20, 50, 100, 200, 400, 800, 1000].into_iter();
+        loop {
             match fs::remove_dir_all(root) {
                 Ok(()) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
                 Err(error) => {
-                    cleanup_error = Some(error);
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    if cfg!(windows)
+                        && matches!(error.raw_os_error(), Some(32 | 33))
+                        && let Some(delay) = delays.next()
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        continue;
+                    }
+                    panic!("failed to remove test database: {error}");
                 }
             }
         }
-        panic!("failed to remove test database: {}", cleanup_error.unwrap());
     }
 
     #[tokio::test]
@@ -469,7 +477,7 @@ mod tests {
         assert!(delete(database.pool(), "single_choice").await.is_err());
 
         database.close().await;
-        remove_test_root(&root);
+        remove_test_root(&root).await;
     }
 
     #[tokio::test]
@@ -528,6 +536,6 @@ mod tests {
 
         drop(definitions);
         database.close().await;
-        remove_test_root(&root);
+        remove_test_root(&root).await;
     }
 }

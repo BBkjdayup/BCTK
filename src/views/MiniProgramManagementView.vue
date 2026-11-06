@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Check,
@@ -14,8 +14,10 @@ import {
   User,
   View,
 } from '@element-plus/icons-vue'
+import MiniLearningReport from '../components/MiniLearningReport.vue'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import SupportContactDialog from '../components/SupportContactDialog.vue'
+import miniProgramCode from '../assets/miniprogram-code.jpg'
 import { backend, isDesktopRuntime } from '../services/backend'
 import { useMiniProgramCloudStore } from '../stores/miniProgramCloud'
 import { errorMessage } from '../services/errors'
@@ -24,17 +26,19 @@ import type { Paper, PaperSummary } from '../types/domain'
 import type { MiniProgramMember, MiniProgramMemberStatus, MiniProgramPublication } from '../types/miniProgram'
 import { currentPublicationRows, publicationActions, publicationRow, type PublicationRow } from '../utils/miniProgramPublicationRows'
 
-type Section = 'papers' | 'invites' | 'members' | 'plan'
+type Section = 'papers' | 'invites' | 'members' | 'plan' | 'learning'
 type MemberFilter = 'all' | MiniProgramMemberStatus
 
 const live = isDesktopRuntime()
 const cloudStore = useMiniProgramCloudStore()
+onBeforeUnmount(() => cloudStore.cancelPublication())
 const miniStore = live ? cloudStore : useMiniProgramStore()
 const authForm = reactive({ account: '', password: '', register: false })
 const authBusy = ref(false)
 const cloudError = ref('')
 const supportOpen = ref(false)
 const supportRefreshing = ref(false)
+const miniProgramCodeOpen = ref(false)
 async function refreshAuthorization() {
   if (supportRefreshing.value || !cloudStore.user) return
   supportRefreshing.value = true
@@ -76,6 +80,11 @@ const withdrawnLoading = ref(false)
 const withdrawnError = ref('')
 let withdrawnRequest = 0
 const memberFilter = ref<MemberFilter>('pending')
+const memberKeyword = ref(''), inviteKeyword = ref('')
+const inviteFilter = ref('all')
+const memberPage = ref(1), invitePage = ref(1), countedPage = ref(1)
+const managementPageSize = 20
+const managementError = ref('')
 const previewOpen = ref(false)
 const previewLoading = ref(false)
 const previewPaper = ref<Paper | null>(null)
@@ -88,6 +97,7 @@ const sections: Array<{ id: Section; label: string; icon: typeof Document }> = [
   { id: 'papers', label: '发布试卷', icon: Document },
   { id: 'invites', label: '邀请码', icon: Link },
   { id: 'members', label: '成员审核', icon: User },
+  { id: 'learning', label: '学习情况', icon: DataBoard },
   { id: 'plan', label: '名额与授权', icon: DataBoard },
 ]
 
@@ -113,7 +123,7 @@ const serviceAvailable = computed(() => serviceStatus.value.label === '使用中
 const quotaPercent = computed(() => miniStore.settings.quota
   ? Math.min(100, Math.round((miniStore.usedQuota / miniStore.settings.quota) * 100))
   : 0)
-const pendingCount = computed(() => miniStore.members.filter((member) => member.status === 'pending').length)
+const pendingCount = computed(() => live ? cloudStore.pendingCount : miniStore.members.filter((member) => member.status === 'pending').length)
 const servicePeriodLabel = computed(() => {
   if (miniStore.settings.freeQuota === 1) {
     const paid = miniStore.settings.paidStatus
@@ -172,15 +182,38 @@ watch(paperTotal, total => {
   if (paperFilter.value === 'current' || !live) paperPage.value = Math.min(paperPage.value, Math.max(1, Math.ceil(total / paperPageSize)))
 })
 
-const filteredInvites = computed(() => [...miniStore.invites]
+const filteredInvites = computed(() => live ? cloudStore.invites : [...miniStore.invites]
   .sort((left, right) => right.createdAt - left.createdAt))
 
-const filteredMembers = computed(() => miniStore.members
+const filteredMembers = computed(() => live ? cloudStore.members : miniStore.members
   .filter((member) => memberFilter.value === 'all' || member.status === memberFilter.value)
   .sort((left, right) => right.requestedAt - left.requestedAt))
 
-const countedMembers = computed(() => [...miniStore.countedMembers]
+const countedMembers = computed(() => live ? cloudStore.countedMembers : [...miniStore.countedMembers]
   .sort((left, right) => (right.joinedAt ?? right.requestedAt) - (left.joinedAt ?? left.requestedAt)))
+
+watch([memberFilter, memberKeyword], () => { memberPage.value = 1 })
+watch([inviteFilter, inviteKeyword], () => { invitePage.value = 1 })
+watch(() => cloudStore.user?.id, () => { memberPage.value = 1; invitePage.value = 1; countedPage.value = 1; managementError.value = '' })
+watch([activeSection, memberFilter, memberKeyword, memberPage, inviteFilter, inviteKeyword, invitePage, countedPage, () => cloudStore.ready], (_, __, onCleanup) => {
+  if (!live || !cloudStore.ready || !cloudStore.user || ['papers','learning'].includes(activeSection.value)) return
+  const section = activeSection.value === 'plan' ? 'counted' : activeSection.value as 'members' | 'invites'
+  cloudStore.invalidateManagement(section)
+  let current = true
+  const timer = setTimeout(async () => {
+    managementError.value = ''
+    try {
+      await cloudStore.loadManagement(section, section === 'members'
+        ? { keyword: memberKeyword.value, status: memberFilter.value, page: memberPage.value, pageSize: managementPageSize }
+        : section === 'invites' ? { keyword: inviteKeyword.value, status: inviteFilter.value, page: invitePage.value, pageSize: managementPageSize }
+        : { keyword: '', status: 'all', countedOnly: true, page: countedPage.value, pageSize: managementPageSize })
+    } catch (reason) { if (current) managementError.value = errorMessage(reason, '列表读取失败，请刷新重试') }
+  }, 200)
+  onCleanup(() => { current = false; clearTimeout(timer); cloudStore.invalidateManagement(section) })
+})
+for (const [section, page] of [['members', memberPage], ['invites', invitePage], ['counted', countedPage]] as const) {
+  watch(() => cloudStore.totals[section], total => { page.value = Math.min(page.value, Math.max(1, Math.ceil(total / managementPageSize))) })
+}
 
 function formatDateTime(value: number | null) {
   if (!value) return '—'
@@ -417,14 +450,30 @@ onMounted(() => {
           <el-badge v-if="item.id === 'members' && pendingCount" :value="pendingCount" :max="99" />
         </button>
       </nav>
-      <div class="mini-sidebar__note">
-        <template v-if="live"><strong>{{ cloudStore.user?.username || '小程序管理账号' }}</strong><div v-if="cloudStore.user"><el-button link :disabled="cloudStore.busy" @click="refreshCloud">刷新状态</el-button><el-button link :disabled="cloudStore.busy" @click="signOut">退出登录</el-button></div></template>
-        <strong v-else>本地界面预览</strong>
+      <div class="mini-sidebar__footer">
+        <button class="mini-program-code-entry" type="button" aria-label="查看小程序码" @click="miniProgramCodeOpen = true">
+          <img :src="miniProgramCode" alt="TK试题题库微信小程序码" width="160" height="160">
+          <strong>微信扫码使用</strong>
+          <span>点击放大</span>
+        </button>
+        <div class="mini-sidebar__note">
+          <template v-if="live"><strong>{{ cloudStore.user?.username || '小程序管理账号' }}</strong><div v-if="cloudStore.user"><el-button link :disabled="cloudStore.busy" @click="refreshCloud">刷新状态</el-button><el-button link :disabled="cloudStore.busy" @click="signOut">退出登录</el-button></div></template>
+          <strong v-else>本地界面预览</strong>
+        </div>
       </div>
     </aside>
 
-    <main class="page-main mini-main" v-loading="live && cloudStore.busy">
+    <main class="page-main mini-main" v-loading="live && cloudStore.busy && !cloudStore.publicationProgress">
+      <div v-if="live && cloudStore.publicationProgress" class="surface" role="status" aria-live="polite">
+        <p v-if="cloudStore.publicationProgress.phase === 'waiting'">资源已完成 {{ cloudStore.publicationProgress.completed }}/{{ cloudStore.publicationProgress.total }}；上传较多，等待 {{ cloudStore.publicationProgress.retryAfterSeconds }} 秒后自动继续。</p>
+        <p v-else-if="cloudStore.publicationProgress.phase === 'submitting'">资源已准备完成，正在提交试卷，请稍候。</p>
+        <p v-else>正在准备发布资源 {{ cloudStore.publicationProgress.completed }}/{{ cloudStore.publicationProgress.total }}</p>
+        <el-progress :percentage="cloudStore.publicationProgress.total ? Math.floor(100 * cloudStore.publicationProgress.completed / cloudStore.publicationProgress.total) : 0" />
+        <el-button v-if="cloudStore.publicationProgress.phase !== 'submitting'" @click="cloudStore.cancelPublication">取消发布</el-button>
+      </div>
       <div v-if="cloudError" class="mini-cloud-error" role="alert">{{ cloudError }}<el-button v-if="cloudStore.user" link @click="refreshCloud">重试</el-button></div>
+      <el-alert v-if="managementError && activeSection !== 'papers'" :title="managementError" type="error" :closable="false" />
+      <el-alert v-if="live && cloudStore.user && cloudStore.managementMode === 'legacy' && activeSection !== 'papers'" title="云服务尚未升级分页接口，目前邀请码最多显示最近 500 条。升级云服务后可查询全部记录。" type="warning" :closable="false" />
       <section v-if="live && !cloudStore.user" class="surface mini-account">
         <h3>{{ authForm.register ? '注册题库拥有者账号' : '登录题库拥有者账号' }}</h3>
         <el-form label-position="top" @submit.prevent="connectAccount">
@@ -435,6 +484,8 @@ onMounted(() => {
         </el-form>
         <el-button class="mini-contact-entry" @click="supportOpen = true">联系开通</el-button>
       </section>
+      <MiniLearningReport v-else-if="activeSection === 'learning' && live" :key="cloudStore.user?.id"/>
+      <el-empty v-else-if="activeSection === 'learning'" description="登录桌面端的小程序管理账号后查看真实学习数据"/>
       <section v-else-if="activeSection === 'papers'" class="mini-section">
         <div class="surface mini-table-wrap mini-table-card">
           <div class="mini-table-toolbar" role="group" aria-label="试卷操作">
@@ -479,10 +530,12 @@ onMounted(() => {
       <section v-else-if="activeSection === 'invites'" class="mini-section">
         <div class="surface mini-table-wrap mini-table-card">
           <div class="mini-table-toolbar" role="group" aria-label="邀请码操作">
+            <el-input v-if="live" v-model="inviteKeyword" placeholder="搜索邀请码备注" clearable style="max-width: 220px" />
+            <el-select v-if="live" v-model="inviteFilter" style="width: 110px"><el-option label="全部" value="all" /><el-option label="使用中" value="active" /><el-option label="已到期" value="expired" /><el-option label="已停用" value="stopped" /></el-select>
             <el-button type="primary" :icon="Plus" @click="openInviteDialog">新建邀请码</el-button>
           </div>
           <div class="mini-table-body">
-          <el-table :data="filteredInvites" row-key="id" height="100%">
+          <el-table v-loading="live && cloudStore.managementLoading.invites" :data="filteredInvites" row-key="id" height="100%">
             <el-table-column label="邀请码" min-width="180">
               <template #default="{ row }"><strong class="mini-code">{{ row.code || '仅创建时显示，请换新码' }}</strong><span class="mini-table-sub">{{ row.label }}</span></template>
             </el-table-column>
@@ -498,12 +551,14 @@ onMounted(() => {
             <template #empty><el-empty description="还没有邀请码" :image-size="72" /></template>
           </el-table>
           </div>
+          <div v-if="live" class="mini-pagination"><el-pagination v-model:current-page="invitePage" :page-size="managementPageSize" :total="cloudStore.totals.invites" layout="total, prev, pager, next" /></div>
         </div>
       </section>
 
       <section v-else-if="activeSection === 'members'" class="mini-section">
         <div class="surface mini-table-wrap mini-table-card">
           <div class="mini-table-toolbar mini-table-toolbar--members" role="group" aria-label="成员筛选与操作">
+            <el-input v-if="live" v-model="memberKeyword" placeholder="搜索成员姓名或账号" clearable style="max-width: 220px" />
             <el-radio-group v-model="memberFilter" size="small">
               <el-radio-button label="pending">待审核 {{ pendingCount }}</el-radio-button>
               <el-radio-button label="active">已授权</el-radio-button>
@@ -513,7 +568,7 @@ onMounted(() => {
             <el-button v-if="!live" type="primary" :icon="Plus" @click="openMemberDialog">登记成员</el-button><el-button v-else :icon="Refresh" @click="refreshCloud">刷新成员</el-button>
           </div>
           <div class="mini-table-body">
-          <el-table :data="filteredMembers" row-key="id" height="100%">
+          <el-table v-loading="live && cloudStore.managementLoading.members" :data="filteredMembers" row-key="id" height="100%">
             <el-table-column label="成员" min-width="220"><template #default="{ row }"><strong>{{ row.name }}</strong><span class="mini-table-sub">{{ row.account }}</span></template></el-table-column>
             <el-table-column label="申请时间" width="145"><template #default="{ row }">{{ formatDateTime(row.requestedAt) }}</template></el-table-column>
             <el-table-column label="状态" width="120"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row).type">{{ memberStatus(row).label }}</el-tag></template></el-table-column>
@@ -528,6 +583,7 @@ onMounted(() => {
             <template #empty><el-empty description="当前筛选下没有成员记录" :image-size="72" /></template>
           </el-table>
           </div>
+          <div v-if="live" class="mini-pagination"><el-pagination v-model:current-page="memberPage" :page-size="managementPageSize" :total="cloudStore.totals.members" layout="total, prev, pager, next" /></div>
         </div>
       </section>
 
@@ -553,18 +609,25 @@ onMounted(() => {
           </section>
         </div>
         <div class="surface mini-table-wrap mini-ledger">
-          <div class="mini-ledger__head"><h3>授权记录</h3><span>共 {{ countedMembers.length }} 条计入记录</span></div>
-          <el-table :data="countedMembers" row-key="id" height="100%">
+          <div class="mini-ledger__head"><h3>授权记录</h3><span>共 {{ live ? cloudStore.totals.counted : countedMembers.length }} 条计入记录</span></div>
+          <el-table v-loading="live && cloudStore.managementLoading.counted" :data="countedMembers" row-key="id" height="100%">
             <el-table-column label="成员" min-width="220"><template #default="{ row }"><strong>{{ row.name }}</strong><span class="mini-table-sub">{{ row.account }}</span></template></el-table-column>
             <el-table-column v-if="miniStore.settings.freeQuota === 1" label="名额" width="115"><template #default="{ row }">{{ row.seatType === 'free' ? '永久免费' : row.seatType === 'paid' ? '付费套餐' : '—' }}</template></el-table-column>
             <el-table-column label="通过时间" width="155"><template #default="{ row }">{{ formatDateTime(row.joinedAt) }}</template></el-table-column>
             <el-table-column label="状态" width="120"><template #default="{ row }"><el-tag size="small" :type="memberStatus(row).type">{{ memberStatus(row).label }}</el-tag></template></el-table-column>
           </el-table>
+          <div v-if="live" class="mini-pagination"><el-pagination v-model:current-page="countedPage" :page-size="managementPageSize" :total="cloudStore.totals.counted" layout="total, prev, pager, next" /></div>
         </div>
       </section>
     </main>
 
     <SupportContactDialog v-model="supportOpen" :account="cloudStore.user?.username || ''" :live="live" :refreshing="supportRefreshing" @refresh="refreshAuthorization" />
+
+    <el-dialog v-model="miniProgramCodeOpen" title="微信扫码使用" width="360px" align-center>
+      <div class="mini-program-code-preview">
+        <img :src="miniProgramCode" alt="TK试题题库微信小程序码大图" width="258" height="258">
+      </div>
+    </el-dialog>
 
     <el-dialog v-model="inviteDialogOpen" title="新建邀请码" width="480px">
       <el-form label-position="top" @submit.prevent="saveInvite">
@@ -606,7 +669,16 @@ onMounted(() => {
 .mini-sidebar .sidebar-menu__item { font-size: 12px; }
 .mini-sidebar .el-icon { margin-right: 2px; font-size: 15px; }
 .mini-sidebar .el-badge { margin-left: auto; }
-.mini-sidebar__note { margin: auto 16px 18px; padding: 12px; border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; color: #64748b; font-size: 11px; line-height: 1.7; }
+.mini-sidebar__footer { margin: auto 16px 18px; padding-top: 20px; display: flex; flex-direction: column; gap: 14px; flex-shrink: 0; }
+.mini-program-code-entry { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; padding: 12px; border: 1px solid #e2e8f0; border-radius: 10px; background: #fff; color: #334155; cursor: zoom-in; }
+.mini-program-code-entry:hover { border-color: #93c5fd; background: #f8fbff; }
+.mini-program-code-entry:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+.mini-program-code-entry img { display: block; width: 160px; max-width: 100%; height: auto; }
+.mini-program-code-entry strong { font-size: 13px; font-weight: 600; }
+.mini-program-code-entry span { color: #64748b; font-size: 11px; }
+.mini-program-code-preview { display: flex; justify-content: center; padding: 8px 0 16px; }
+.mini-program-code-preview img { display: block; width: 258px; max-width: 100%; height: auto; }
+.mini-sidebar__note { padding: 12px; border: 1px solid #dbeafe; border-radius: 8px; background: #f8fbff; color: #64748b; font-size: 11px; line-height: 1.7; overflow-wrap: anywhere; }
 .mini-sidebar__note strong { color: #1e40af; font-size: 12px; }
 .mini-sidebar__note p { margin: 6px 0 0; }
 .mini-main { display: flex; flex-direction: column; overflow: hidden; }

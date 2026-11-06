@@ -3,6 +3,7 @@ use std::{ops::Deref, path::PathBuf, sync::Arc};
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, RwLock};
 
 use crate::db::Database;
+use crate::startup::StartupProgress;
 
 use super::models::{CommandError, CommandResult};
 
@@ -87,8 +88,18 @@ impl AppState {
         }
     }
 
+    #[cfg(test)]
     pub async fn initialize(data_root: PathBuf, app_version: String) -> Self {
-        let database = Database::open(data_root.clone(), &app_version).await;
+        Self::initialize_with_progress(data_root, app_version, &StartupProgress::default()).await
+    }
+
+    pub async fn initialize_with_progress(
+        data_root: PathBuf,
+        app_version: String,
+        progress: &StartupProgress,
+    ) -> Self {
+        let database =
+            Database::open_with_progress(data_root.clone(), &app_version, progress).await;
         match database {
             Ok(database) => Self {
                 database: Arc::new(RwLock::new(Some(database))),
@@ -176,29 +187,45 @@ impl AppState {
         self.initialization_error.read().await.clone()
     }
 
+    #[cfg(test)]
     pub async fn retry_initialize(&self) -> CommandResult<()> {
+        self.retry_initialize_with_progress(&StartupProgress::default())
+            .await
+    }
+
+    pub async fn retry_initialize_with_progress(
+        &self,
+        progress: &StartupProgress,
+    ) -> CommandResult<()> {
         let _retry_guard = self.retry_guard.lock().await;
         let _maintenance_guard = Arc::clone(&self.maintenance).write_owned().await;
         if self.database.read().await.is_some() {
             return Ok(());
         }
+        progress.restart();
+        progress.stage("restore", "正在检查上次恢复任务");
         if let Err(error) = crate::restore::apply_pending_restore(&self.data_root).await {
             let message = format!("恢复维护仍未完成：{}", error.message);
             *self.initialization_error.write().await = Some(message.clone());
+            progress.finish(Some(message.clone()));
             return Err(CommandError::new("RESTORE_MAINTENANCE_UNRESOLVED", message));
         }
-        match Database::open(self.data_root.clone(), &self.app_version).await {
+        match Database::open_with_progress(self.data_root.clone(), &self.app_version, progress)
+            .await
+        {
             Ok(database) => {
                 let previous = self.database.write().await.replace(database);
                 *self.initialization_error.write().await = None;
                 if let Some(previous) = previous {
                     previous.close().await;
                 }
+                progress.finish(None);
                 Ok(())
             }
             Err(error) => {
                 let message = error.to_string();
                 *self.initialization_error.write().await = Some(message.clone());
+                progress.finish(Some(message.clone()));
                 Err(CommandError::new(
                     "DATABASE_INITIALIZATION_FAILED",
                     format!("本地数据库重新加载失败：{message}"),

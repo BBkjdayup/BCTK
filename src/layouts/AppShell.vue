@@ -11,6 +11,7 @@ import { suppressUnconfiguredContextMenu } from '../utils/contextMenuGuard'
 import { usePaperStore } from '../stores/paper'
 import { canCloseApplication, registerCloseGuard } from '../services/closeProtection'
 import { installStagedAppUpdateOnClose } from '../utils/appUpdateFlow'
+import StartupLoading from '../components/StartupLoading.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -68,6 +69,7 @@ const activePath = computed(() => {
 
 const desktopModeLabel = computed(() => {
   if (!desktopAvailable) return '浏览器演示模式'
+  if (appStore.loading) return '正在准备题库'
   if (!appStore.databaseHealthy) return '数据库异常'
   return '免费离线版'
 })
@@ -173,6 +175,7 @@ async function createFirstSubject() {
           :key="item.path"
           class="topnav__item"
           :class="{ 'is-active': activePath === item.path }"
+          :disabled="appStore.loading"
           @click="router.push(item.path)"
         >
           {{ item.label }}
@@ -188,7 +191,7 @@ async function createFirstSubject() {
 
     <main class="shell__content">
       <div v-if="appStore.loading" class="shell-loading">
-        <el-skeleton :rows="7" animated />
+        <StartupLoading />
       </div>
       <div v-else-if="!appStore.databaseHealthy" class="database-error">
         <div class="database-error__card surface danger-card">

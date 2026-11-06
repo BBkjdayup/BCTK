@@ -1,6 +1,6 @@
 [package]
 name = "zhitiku-desktop"
-version = "0.1.97"
+version = "0.1.105"
 description = "TK试题题库 Windows 离线题库管理软件"
 authors = ["Zhitiku"]
 license = "MIT"
@@ -37,7 +37,7 @@ calamine = { version = "0.36.1", default-features = false }
 cfb = "0.14"
 scraper = { version = "0.27", default-features = false }
 ego-tree = "0.11"
-tex2word-math = "1.0.6"
+tex2word-math = { version = "1.0.6", path = "vendor/tex2word-math" }
 time = { version = "0.3.53", features = ["local-offset"] }
 png = "0.17.16"
 

@@ -52,11 +52,14 @@ pub struct PaperImage {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaperTable {
     pub rows: Vec<PaperTableRow>,
+    pub width_px: Option<u32>,
+    pub column_widths_px: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PaperTableRow {
     pub cells: Vec<PaperTableCell>,
+    pub min_height_px: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,7 +206,33 @@ fn collect_list(
 fn parse_table(node: NodeRef<'_, Node>, unsupported: &mut Vec<String>) -> PaperTable {
     let mut rows = Vec::new();
     collect_table_rows(node, &mut rows, unsupported);
-    PaperTable { rows }
+    let width_px = node.value().as_element().and_then(|element| {
+        table_pixel_attribute(element.attr("data-table-width"))
+            .or_else(|| pixel_style(element.attr("style"), "width"))
+    });
+    let column_widths_px = node
+        .children()
+        .filter(|child| {
+            child
+                .value()
+                .as_element()
+                .is_some_and(|element| element.name() == "colgroup")
+        })
+        .flat_map(|group| group.children())
+        .filter_map(|child| child.value().as_element())
+        .filter(|element| element.name() == "col")
+        .take(256)
+        .map(|element| {
+            table_pixel_attribute(element.attr("width"))
+                .or_else(|| pixel_style(element.attr("style"), "width"))
+        })
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default();
+    PaperTable {
+        rows,
+        width_px,
+        column_widths_px,
+    }
 }
 
 fn collect_table_rows(
@@ -243,7 +272,11 @@ fn collect_table_rows(
                     });
                 }
                 if !cells.is_empty() {
-                    rows.push(PaperTableRow { cells });
+                    rows.push(PaperTableRow {
+                        cells,
+                        min_height_px: table_pixel_attribute(element.attr("data-row-min-height"))
+                            .or_else(|| pixel_style(element.attr("style"), "height")),
+                    });
                 }
             }
             "table" => unsupported.push("暂不支持表格中嵌套表格".to_owned()),
@@ -257,6 +290,22 @@ fn positive_attribute(value: Option<&str>) -> u32 {
         .and_then(|value| value.trim().parse::<u32>().ok())
         .filter(|value| (1..=64).contains(value))
         .unwrap_or(1)
+}
+
+fn table_pixel_attribute(value: Option<&str>) -> Option<u32> {
+    value
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0 && *value <= 10_000.0)
+        .map(|value| value.round().max(1.0) as u32)
+}
+
+fn pixel_style(style: Option<&str>, property: &str) -> Option<u32> {
+    style?
+        .split(';')
+        .filter_map(|declaration| declaration.split_once(':'))
+        .filter(|(name, _)| name.trim().eq_ignore_ascii_case(property))
+        .filter_map(|(_, value)| table_pixel_attribute(value.trim().strip_suffix("px")))
+        .next_back()
 }
 
 fn push_paragraph(blocks: &mut Vec<PaperBlock>, inlines: Vec<PaperInline>) {
@@ -275,9 +324,14 @@ fn collect_inlines(
             let name = element.name();
             if is_formula(element) {
                 match element.attr("data-latex").map(str::trim) {
-                    Some(latex) if !latex.is_empty() => output.push(PaperInline::Formula {
-                        latex: latex.to_owned(),
-                    }),
+                    Some(latex) if !latex.is_empty() => {
+                        if let Err(message) = tex2word_math::try_to_omath(latex) {
+                            unsupported.push(format!("公式无法安全导出：{message}"));
+                        }
+                        output.push(PaperInline::Formula {
+                            latex: latex.to_owned(),
+                        });
+                    }
                     _ => unsupported.push("发现缺少 LaTeX 内容的公式节点".to_owned()),
                 }
                 return;

@@ -21,6 +21,7 @@ import {
   type Paper,
   type PaperItem,
   type Question,
+  type QuestionSummary,
   type QuestionType,
   type TemplateLayoutPreview,
   type WordTemplate,
@@ -66,7 +67,7 @@ const questionContextMenuOpen = ref(false)
 const questionContextMenuX = ref(0)
 const questionContextMenuY = ref(0)
 const questionContextMenuTitle = ref('')
-const contextQuestion = ref<Question | null>(null)
+const contextQuestion = ref<QuestionSummary | Question | null>(null)
 const questionContextMenuItems: ContextMenuItem[] = [
   { id: 'view-question', label: '查看试题内容' },
 ]
@@ -373,14 +374,28 @@ async function changePreviewTemplate(templateId: string) {
   }
 }
 
-function addQuestion(question: Question) {
-  paperStore.current.compositionMode = 'manual'
-  paperStore.current.generationConfig = null
-  const added = paperStore.addQuestions([question])
-  if (added) ElMessage.success('已加入当前试卷')
+async function readCandidate(question: QuestionSummary): Promise<Question> {
+  const full = await backend.getQuestion(question.id)
+  if (!full || full.deletedAt || full.contentVersion !== question.contentVersion) {
+    await bankStore.load()
+    throw new Error('题目已变更，列表已刷新，请重新选择')
+  }
+  return full
 }
 
-function openQuestionContextMenu(event: MouseEvent, question: Question) {
+async function addQuestion(question: QuestionSummary) {
+  const paperId = paperStore.current.id
+  try {
+    const full = await readCandidate(question)
+    if (paperStore.current.id !== paperId) throw new Error('当前试卷已切换，请重新添加题目')
+    paperStore.current.compositionMode = 'manual'
+    paperStore.current.generationConfig = null
+    const added = paperStore.addQuestions([full])
+    if (added) ElMessage.success('已加入当前试卷')
+  } catch (reason) { ElMessage.error(errorMessage(reason, '读取题目失败')) }
+}
+
+function openQuestionContextMenu(event: MouseEvent, question: QuestionSummary | Question) {
   const target = event.target as HTMLElement | null
   if (target?.closest('button, input, textarea, select, a, [contenteditable="true"], [role="button"], [role="textbox"]')) return
   event.preventDefault()
@@ -391,10 +406,18 @@ function openQuestionContextMenu(event: MouseEvent, question: Question) {
   questionContextMenuOpen.value = true
 }
 
-function handleQuestionContextMenu(item: ContextMenuItem) {
+let previewRead = 0
+onBeforeUnmount(() => { previewRead++ })
+async function handleQuestionContextMenu(item: ContextMenuItem) {
   if (item.id !== 'view-question' || !contextQuestion.value) return
-  previewQuestion.value = contextQuestion.value
-  questionPreviewOpen.value = true
+  const request = ++previewRead, question = contextQuestion.value
+  try {
+    // Paper rows carry an immutable snapshot; candidate rows load current details.
+    const full = 'answer' in question ? question as Question : await readCandidate(question)
+    if (request !== previewRead) return
+    previewQuestion.value = full
+    questionPreviewOpen.value = true
+  } catch (reason) { ElMessage.error(errorMessage(reason, '读取题目失败')) }
 }
 
 async function clearPaper() {

@@ -5,7 +5,7 @@ import { Delete, RefreshLeft } from '@element-plus/icons-vue'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { useQuestionBankStore } from '../stores/questionBank'
 import { useAppStore } from '../stores/app'
-import { type Question } from '../types/domain'
+import { type QuestionSummary } from '../types/domain'
 import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
 import { questionTypeLabel } from '../utils/questionTypes'
@@ -24,7 +24,7 @@ onMounted(() => {
     .catch(() => undefined)
 })
 
-function onSelectionChange(items: Question[]) {
+function onSelectionChange(items: QuestionSummary[]) {
   store.selectedIds = items.map((item) => item.id)
 }
 

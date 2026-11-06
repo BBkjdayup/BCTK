@@ -7,7 +7,6 @@ import type {
 } from '../types/domain'
 import {
   DEFAULT_DOCUMENT_ENTRY_TEMPLATE_CONFIG,
-  DEFAULT_DOCUMENT_ENTRY_TEMPLATE_ID,
   matchOptionMarker,
 } from './documentEntryTemplates'
 import {
@@ -15,7 +14,6 @@ import {
   TIPTAP_CONTENT_EDITOR_VERSION,
 } from './richContent'
 
-export const DOCUMENT_ENTRY_TEMPLATE_ID = DEFAULT_DOCUMENT_ENTRY_TEMPLATE_ID
 export const DOCUMENT_ENTRY_SOURCE_FILE_NAME = '文档式批量录入.docx'
 export const DOCUMENT_ENTRY_PARSER_VERSION = 'w1-ooxml-images-5'
 

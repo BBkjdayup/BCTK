@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, h, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '../components/PageHeader.vue'
@@ -11,7 +11,7 @@ import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
 import { useAppStore } from '../stores/app'
 import { useQuestionBankStore } from '../stores/questionBank'
-import type { Question, QuestionDuplicateGroup, QuestionDuplicateScanResult } from '../types/domain'
+import type { Question, QuestionDuplicateMergeReceipt, QuestionDuplicateGroup, QuestionDuplicateScanResult } from '../types/domain'
 import { reconcileDuplicateCheckTab, type DuplicateCheckTab } from '../utils/duplicateCheckTabs'
 import { questionTypeLabel } from '../utils/questionTypes'
 
@@ -25,11 +25,27 @@ const result = ref<QuestionDuplicateScanResult | null>(null)
 const loadError = ref('')
 const activeTab = ref<DuplicateCheckTab>('exact')
 const keepers = ref<Record<string, string>>({})
+const latestMerge = ref<QuestionDuplicateMergeReceipt | null>(null)
+let mergeReceiptRevision = 0
+onMounted(async () => {
+  const revision = mergeReceiptRevision
+  try {
+    const receipt = await backend.latestQuestionDuplicateMerge()
+    if (revision === mergeReceiptRevision) latestMerge.value = receipt
+  } catch (reason) {
+    if (revision === mergeReceiptRevision) ElMessage.warning(errorMessage(reason, '读取上次归并记录失败'))
+  }
+})
 const previewOpen = ref(false)
 const previewQuestion = ref<Question | null>(null)
 let scanSequence = 0
+let activeScanId: string | undefined
+function stopBackendScan() {
+  if (activeScanId) void backend.cancelQuestionDuplicateScan(activeScanId).catch(() => undefined)
+  activeScanId = undefined
+}
 let stemLoader = createQuestionStemLoader((ids) => backend.getQuestionStemSummaries(ids))
-onBeforeUnmount(() => { scanSequence += 1; stemLoader.dispose() })
+onBeforeUnmount(() => { scanSequence += 1; mergeReceiptRevision += 1; stopBackendScan(); stemLoader.dispose() })
 
 function loadStem(member: QuestionDuplicateGroup['members'][number]) {
   return stemLoader.load(member.id, member.contentVersion)
@@ -70,6 +86,7 @@ function resetKeepers(scanResult: QuestionDuplicateScanResult) {
 }
 
 async function scan() {
+  stopBackendScan()
   const requestSequence = ++scanSequence
   stemLoader.dispose()
   stemLoader = createQuestionStemLoader((ids) => backend.getQuestionStemSummaries(ids))
@@ -83,11 +100,13 @@ async function scan() {
   bankStore.filters.chapterId = chapterId.value || undefined
   bankStore.filters.page = 1
   loading.value = true
+  const scanId = crypto.randomUUID()
+  activeScanId = scanId
   try {
     const scanResult = await backend.scanQuestionDuplicates({
       subjectId: subjectId.value,
       chapterId: chapterId.value || undefined,
-    })
+    }, scanId)
     if (requestSequence !== scanSequence) return
     result.value = scanResult
     resetKeepers(scanResult)
@@ -96,11 +115,13 @@ async function scan() {
     if (requestSequence !== scanSequence) return
     loadError.value = errorMessage(reason, '题目查重失败')
   } finally {
+    if (activeScanId === scanId) activeScanId = undefined
     if (requestSequence === scanSequence) loading.value = false
   }
 }
 
 function cancelScan() {
+  stopBackendScan()
   scanSequence += 1
   loading.value = false
   void router.push('/questions')
@@ -128,26 +149,37 @@ async function recycleDuplicates(group: QuestionDuplicateGroup) {
   if (!keeper || operationGroupId.value) return
   const sequence = scanSequence
   operationGroupId.value = group.id
-  let stem
+  let fullMembers: Question[] = []
   try {
-    stem = await loadStem(keeper)
+    if (group.members.length > 500) throw new Error('本组超过 500 道题，请先缩小整理范围')
+    for (let offset = 0; offset < group.members.length; offset += 100) {
+      fullMembers.push(...await backend.getQuestions(group.members.slice(offset, offset + 100).map(m => m.id)))
+    }
+    const versions = new Map(group.members.map(m => [m.id, m.contentVersion]))
+    if (fullMembers.length !== group.members.length || fullMembers.some(q => q.deletedAt || q.contentVersion !== versions.get(q.id))) throw new Error('题目已变更，请重新查重后再处理')
   } catch (reason) {
     if (sequence === scanSequence) ElMessage.error(errorMessage(reason, '题干读取失败，请重新检查后再处理'))
     operationGroupId.value = null
     return
   }
   if (sequence !== scanSequence) { operationGroupId.value = null; return }
+  const fullKeeper = fullMembers.find(q => q.id === keeperId)!
+  const mergedTags = [...new Map(fullMembers.flatMap(q => q.tags).map(tag => [tag.id, tag.name])).values()]
+  const classifications = [...new Set(fullMembers.map(q => `${q.subjectName} / ${q.chapterName}`))]
   try {
     await ElMessageBox.confirm(
       h('div', [
-        h('p', '保留以下题目：'),
-        h(QuestionStemSummary, { content: stem, lines: 3 }),
-        h('p', `其余 ${recycleIds.length} 道题移入回收站，可随后恢复。`),
+        h('p', group.duplicateKind === 'suspected' ? '这些题仅为疑似重复，请确认内容差异可以舍弃。保留以下题目：' : '保留以下题目：'),
+        h(QuestionStemSummary, { content: fullKeeper.stem, lines: 3 }),
+        h('p', `归并后标签：${mergedTags.join('、') || '无'}（共 ${mergedTags.length} 个）`),
+        h('p', `保留分类：${fullKeeper.subjectName} / ${fullKeeper.chapterName}。`),
+        ...(classifications.length > 1 ? [h('p', `本组分类不同：${classifications.join('；')}。其他分类保留在回收站中的原题上。`)] : []),
+        h('p', `其余 ${recycleIds.length} 道题移入回收站。归并后可撤销，历史试卷快照保持不变。`),
       ]),
       '确认处理重复题',
       {
         type: 'warning',
-        confirmButtonText: '移入回收站',
+        confirmButtonText: '归并标签并回收',
         cancelButtonText: '取消',
       },
     )
@@ -158,15 +190,33 @@ async function recycleDuplicates(group: QuestionDuplicateGroup) {
   if (sequence !== scanSequence) { operationGroupId.value = null; return }
   operationGroupId.value = group.id
   try {
-    await backend.moveQuestionsToRecycle(recycleIds)
-    await appStore.refreshTaxonomy()
+    const receipt = await backend.mergeQuestionDuplicates({ keeperId, duplicateKind: group.duplicateKind,
+      members: group.members.map(m => ({ id: m.id, expectedContentVersion: m.contentVersion })),
+    })
+    mergeReceiptRevision += 1
+    latestMerge.value = receipt
     ElMessage.success(`已保留 1 道题，其余 ${recycleIds.length} 道已移入回收站`)
-    await scan()
+    try { await appStore.refreshTaxonomy(); await scan() }
+    catch (reason) { ElMessage.warning(errorMessage(reason, '题目已归并，但列表刷新失败，请重新检查')) }
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '处理重复题失败'))
   } finally {
     operationGroupId.value = null
   }
+}
+
+async function undoMerge() {
+  if (!latestMerge.value || operationGroupId.value) return
+  operationGroupId.value = 'undo'
+  try {
+    await backend.undoQuestionDuplicateMerge(latestMerge.value.id)
+    mergeReceiptRevision += 1
+    latestMerge.value = null
+    ElMessage.success('已恢复重复题及保留题原有的标签')
+    try { await appStore.refreshTaxonomy(); await scan() }
+    catch (reason) { ElMessage.warning(errorMessage(reason, '归并已撤销，但列表刷新失败，请重新检查')) }
+  } catch (reason) { ElMessage.error(errorMessage(reason, '撤销归并失败')) }
+  finally { operationGroupId.value = null }
 }
 
 async function ignoreSuspected(group: QuestionDuplicateGroup) {
@@ -215,6 +265,11 @@ watch(
       <el-button @click="router.push('/questions')">返回题库</el-button>
       <el-button type="primary" :loading="loading" :disabled="!scopeIsValid" @click="scan">重新检查</el-button>
     </PageHeader>
+    <el-alert v-if="latestMerge" type="info" :closable="false">
+      <template #title>最近一次归并回收了 {{ latestMerge.recycledCount }} 道题，保留题共 {{ latestMerge.mergedTagCount }} 个标签。
+        <el-button link type="primary" :disabled="!!operationGroupId || loading" @click="undoMerge">撤销这次归并</el-button>
+      </template>
+    </el-alert>
 
     <section v-if="loading" class="surface scan-state" aria-live="polite">
       <el-progress :percentage="100" :indeterminate="true" :duration="1.5" />

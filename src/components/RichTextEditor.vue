@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import { Grid, Operation, Picture } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { mergeAttributes, Node } from '@tiptap/core'
@@ -13,7 +13,7 @@ import { EditorContent, useEditor } from '@tiptap/vue-3'
 import AppContextMenu from './AppContextMenu.vue'
 import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
-import type { RichContent } from '../types/domain'
+import type { ManagedImagePayload, RichContent } from '../types/domain'
 import type { ContextMenuItem } from '../types/contextMenu'
 import {
   richContentToTiptapDocument,
@@ -22,6 +22,8 @@ import {
 } from '../utils/richContent'
 import { renderMathInto } from '../utils/mathRendering'
 import { embedWpsClipboardImages, wpsClipboardImagePaths } from '../utils/wpsClipboard'
+import { createEditorImageNodeView, type EditorImageSource } from '../utils/editorImageNodeView'
+import { EditorTable, EditorTableRow } from '../utils/editorTable'
 
 type ToolbarMode = 'full' | 'compact' | 'hidden'
 type FormulaTemplate = 'superscript' | 'subscript' | 'fraction' | 'root' | 'plusMinus' | 'multiply' | 'divide'
@@ -75,12 +77,33 @@ const contextToolsOpen = ref(false)
 const contextToolsX = ref(0)
 const contextToolsY = ref(0)
 let updatingFromModel = false
-let imageHydrationGeneration = 0
 let contextSelection: EditorSelectionRange | null = null
 let pendingImageSelection: EditorSelectionRange | null = null
 let pendingTableSelection: EditorSelectionRange | null = null
 let pendingFormulaSelection: EditorSelectionRange | null = null
-const managedImageCache = new Map<string, string>()
+const managedImageCache = new Map<string, EditorImageSource>()
+const managedImageRequests = new Map<string, Promise<EditorImageSource>>()
+
+function cacheManagedImage(payload: ManagedImagePayload): EditorImageSource {
+  const source = {
+    src: `data:${payload.mimeType};base64,${payload.dataBase64}`,
+    width: payload.widthPx,
+    height: payload.heightPx,
+  }
+  managedImageCache.set(payload.resourceId, source)
+  return source
+}
+
+function loadManagedImage(resourceId: string, retry: boolean) {
+  if (retry) managedImageCache.delete(resourceId)
+  const pending = managedImageRequests.get(resourceId)
+  if (pending) return pending
+  const request = backend.getManagedImage(resourceId).then(cacheManagedImage).finally(() => {
+    managedImageRequests.delete(resourceId)
+  })
+  managedImageRequests.set(resourceId, request)
+  return request
+}
 
 const ManagedImage = Image.extend({
   addAttributes() {
@@ -124,132 +147,10 @@ const ManagedImage = Image.extend({
     return ['img', attributes]
   },
   addNodeView() {
-    return ({ node, editor, getPos }) => {
-      let currentNode = node
-      let cleanupDrag: (() => void) | null = null
-      const dom = document.createElement('span')
-      const image = document.createElement('img')
-      const handle = document.createElement('span')
-      const sizeLabel = document.createElement('span')
-      dom.className = 'rich-editor-image-node'
-      dom.contentEditable = 'false'
-      handle.className = 'rich-editor-image-node__handle'
-      handle.setAttribute('role', 'button')
-      handle.setAttribute('aria-label', '拖动调整图片大小')
-      handle.setAttribute('title', '拖动调整图片大小')
-      handle.tabIndex = 0
-      sizeLabel.className = 'rich-editor-image-node__size'
-      dom.append(image, handle, sizeLabel)
-
-      const renderedWidth = () => {
-        const attributeWidth = Number(currentNode.attrs.width)
-        if (Number.isFinite(attributeWidth) && attributeWidth > 0) return attributeWidth
-        const rectangleWidth = image.getBoundingClientRect().width
-        if (rectangleWidth > 0) return rectangleWidth
-        return image.naturalWidth || 320
-      }
-
-      const updateDom = () => {
-        const attributes = currentNode.attrs as Record<string, unknown>
-        const src = typeof attributes.src === 'string' ? attributes.src : ''
-        const resourceId = typeof attributes.resourceId === 'string' ? attributes.resourceId : ''
-        const nodeId = typeof attributes.nodeId === 'string' ? attributes.nodeId : ''
-        const alt = typeof attributes.alt === 'string' ? attributes.alt : ''
-        const title = typeof attributes.title === 'string' ? attributes.title : ''
-        const width = Number(attributes.width)
-        const height = Number(attributes.height)
-        if (src) image.src = src
-        else image.removeAttribute('src')
-        if (resourceId) image.dataset.resourceId = resourceId
-        else delete image.dataset.resourceId
-        if (nodeId) image.dataset.nodeId = nodeId
-        else delete image.dataset.nodeId
-        image.alt = alt
-        image.title = title
-        if (Number.isFinite(width) && width > 0) image.setAttribute('width', String(Math.round(width)))
-        else image.removeAttribute('width')
-        if (Number.isFinite(height) && height > 0) image.setAttribute('height', String(Math.round(height)))
-        else image.removeAttribute('height')
-        sizeLabel.textContent = Number.isFinite(width) && width > 0 ? `${Math.round(width)} px` : ''
-      }
-
-      const commitWidth = (width: number) => {
-        const position = getPos()
-        if (typeof position !== 'number') return
-        const boundedWidth = Math.max(
-          40,
-          Math.min(Math.round(width), editorHost.value?.clientWidth || 1600),
-        )
-        editor.view.dispatch(editor.view.state.tr.setNodeMarkup(
-          position,
-          undefined,
-          { ...currentNode.attrs, width: boundedWidth, height: null },
-        ))
-      }
-
-      const stopDragging = () => {
-        cleanupDrag?.()
-        cleanupDrag = null
-      }
-
-      handle.addEventListener('pointerdown', (event) => {
-        event.preventDefault()
-        event.stopPropagation()
-        stopDragging()
-        const position = getPos()
-        if (typeof position === 'number') editor.commands.setNodeSelection(position)
-        const startX = event.clientX
-        const startWidth = renderedWidth()
-        let previewWidth = startWidth
-        const onMove = (moveEvent: PointerEvent) => {
-          previewWidth = Math.max(
-            40,
-            Math.min(startWidth + moveEvent.clientX - startX, editorHost.value?.clientWidth || 1600),
-          )
-          image.setAttribute('width', String(Math.round(previewWidth)))
-          image.removeAttribute('height')
-          sizeLabel.textContent = `${Math.round(previewWidth)} px`
-        }
-        const onUp = () => {
-          stopDragging()
-          commitWidth(previewWidth)
-        }
-        window.addEventListener('pointermove', onMove)
-        window.addEventListener('pointerup', onUp, { once: true })
-        window.addEventListener('pointercancel', onUp, { once: true })
-        cleanupDrag = () => {
-          window.removeEventListener('pointermove', onMove)
-          window.removeEventListener('pointerup', onUp)
-          window.removeEventListener('pointercancel', onUp)
-        }
-      })
-      handle.addEventListener('keydown', (event) => {
-        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-        event.preventDefault()
-        const step = event.shiftKey ? 50 : 10
-        commitWidth(renderedWidth() + (event.key === 'ArrowRight' ? step : -step))
-      })
-      image.addEventListener('click', () => {
-        const position = getPos()
-        if (typeof position === 'number') editor.commands.setNodeSelection(position)
-      })
-
-      updateDom()
-      return {
-        dom,
-        update: (updatedNode) => {
-          if (updatedNode.type.name !== this.name) return false
-          currentNode = updatedNode
-          updateDom()
-          return true
-        },
-        selectNode: () => dom.classList.add('is-selected'),
-        deselectNode: () => dom.classList.remove('is-selected'),
-        stopEvent: (event) => event.target === handle,
-        ignoreMutation: (mutation) => mutation.type === 'attributes' && mutation.target === image,
-        destroy: stopDragging,
-      }
-    }
+    return createEditorImageNodeView({
+      cached: (resourceId) => managedImageCache.get(resourceId),
+      load: loadManagedImage,
+    })
   },
 }).configure({ allowBase64: true, inline: true })
 
@@ -396,7 +297,6 @@ function syncModel() {
     html,
     plainText: richContentSearchText({ schemaVersion: 2, document, html, plainText: '' }),
   }
-  void hydrateManagedImages()
 }
 
 const tiptap = useEditor({
@@ -405,7 +305,9 @@ const tiptap = useEditor({
     StarterKit,
     ManagedImage,
     MathNode,
-    TableKit.configure({ table: { resizable: true } }),
+    TableKit.configure({ table: false, tableRow: false }),
+    EditorTable,
+    EditorTableRow,
     Placeholder.configure({ placeholder: () => props.placeholder }),
     Superscript,
     Subscript,
@@ -417,37 +319,10 @@ const tiptap = useEditor({
       class: 'tiptap',
     },
   },
-  onCreate: () => { void hydrateManagedImages() },
   onUpdate: syncModel,
   onSelectionUpdate: updateFormatState,
   onTransaction: updateFormatState,
 })
-
-async function hydrateManagedImages() {
-  await nextTick()
-  const generation = ++imageHydrationGeneration
-  const images = [...(editorHost.value?.querySelectorAll<HTMLImageElement>('img[data-resource-id]') ?? [])]
-  await Promise.all(images.map(async (image) => {
-    const resourceId = image.dataset.resourceId?.trim()
-    if (!resourceId) return
-    try {
-      let dataUrl = managedImageCache.get(resourceId)
-      if (!dataUrl) {
-        const payload = await backend.getManagedImage(resourceId)
-        dataUrl = `data:${payload.mimeType};base64,${payload.dataBase64}`
-        managedImageCache.set(resourceId, dataUrl)
-      }
-      if (generation !== imageHydrationGeneration || !editorHost.value?.contains(image)) return
-      image.src = dataUrl
-      image.removeAttribute('data-resource-load-error')
-    } catch {
-      if (generation !== imageHydrationGeneration || !editorHost.value?.contains(image)) return
-      image.removeAttribute('src')
-      image.dataset.resourceLoadError = 'true'
-      if (!image.alt) image.alt = '图片资源暂时无法读取'
-    }
-  }))
-}
 
 function run(command: () => boolean) {
   command()
@@ -588,10 +463,7 @@ function insertManagedImage(
   alt: string,
   selection?: EditorSelectionRange | null,
 ) {
-  managedImageCache.set(
-    payload.resourceId,
-    `data:${payload.mimeType};base64,${payload.dataBase64}`,
-  )
+  cacheManagedImage(payload)
   const nodeId = crypto.randomUUID()
   run(() => {
     const instance = tiptap.value
@@ -657,10 +529,7 @@ async function onPaste(event: ClipboardEvent) {
         path: payloads[index]!.path,
       }))
       for (const payload of managedPayloads) {
-        managedImageCache.set(
-          payload.resourceId,
-          `data:${payload.mimeType};base64,${payload.dataBase64}`,
-        )
+        cacheManagedImage(payload)
       }
       const embeddedHtml = embedWpsClipboardImages(html, managedPayloads)
       run(() => instance.chain().focus().insertContentAt(range, embeddedHtml).run())
@@ -707,14 +576,9 @@ watch(
     instance.commands.setContent(desired, { emitUpdate: false })
     updatingFromModel = false
     updateFormatState()
-    void hydrateManagedImages()
   },
   { deep: true },
 )
-
-onBeforeUnmount(() => {
-  imageHydrationGeneration += 1
-})
 
 defineExpose({
   execute,
@@ -979,6 +843,40 @@ defineExpose({
   line-height: 0;
   vertical-align: middle;
 }
+.rich-editor__content :deep(.rich-editor-image-node > img) { display: block; }
+.rich-editor__content :deep(.rich-editor-image-node[data-resource-state='loading']),
+.rich-editor__content :deep(.rich-editor-image-node[data-resource-state='error']) {
+  min-width: min(140px, 100%);
+  min-height: 60px;
+}
+.rich-editor__content :deep(.rich-editor-image-node[data-resource-state='error'] > img) { visibility: hidden; }
+.rich-editor__content :deep(.rich-editor-image-node__status) {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-sizing: border-box;
+  padding: 8px;
+  border: 1px dashed #f59e0b;
+  border-radius: 4px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.rich-editor__content :deep(.rich-editor-image-node__status[hidden]) { display: none; }
+.rich-editor__content :deep(.rich-editor-image-node__status button) {
+  padding: 3px 8px;
+  border: 1px solid #fbbf24;
+  border-radius: 4px;
+  background: #fff;
+  color: #92400e;
+  cursor: pointer;
+  font-size: 12px;
+}
 .rich-editor__content :deep(.rich-editor-image-node.is-selected) {
   outline: 2px solid #3b82f6;
   outline-offset: 2px;
@@ -996,6 +894,8 @@ defineExpose({
   background: #2563eb;
   box-shadow: 0 0 0 1px #2563eb;
   cursor: nwse-resize;
+  touch-action: none;
+  user-select: none;
 }
 .rich-editor__content :deep(.rich-editor-image-node__size) {
   position: absolute;
@@ -1011,12 +911,32 @@ defineExpose({
   white-space: nowrap;
 }
 .rich-editor__content :deep(.rich-editor-image-node.is-selected .rich-editor-image-node__handle),
-.rich-editor__content :deep(.rich-editor-image-node.is-selected .rich-editor-image-node__size) {
+.rich-editor__content :deep(.rich-editor-image-node.is-selected .rich-editor-image-node__size),
+.rich-editor__content :deep(.rich-editor-image-node.is-resizing .rich-editor-image-node__handle),
+.rich-editor__content :deep(.rich-editor-image-node.is-resizing .rich-editor-image-node__size) {
   display: block;
 }
-.rich-editor__content :deep(.tiptap table) { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.rich-editor__content :deep(.tiptap table) { max-width: 100%; border-collapse: collapse; table-layout: fixed; }
+.rich-editor__content :deep(.rich-editor-table-node) { position: relative; max-width: 100%; margin: 22px 0 14px; }
+.rich-editor__content :deep(.rich-editor-table-node.is-selected > table),
+.rich-editor__content :deep(.rich-editor-table-node.is-resizing > table) { outline: 2px solid #93c5fd; outline-offset: 1px; }
+.rich-editor__content :deep(.rich-editor-table-node__controls) { display: none; font-size: 12px; line-height: 1.4; }
+.rich-editor__content :deep(.rich-editor-table-node.is-selected > .rich-editor-table-node__controls),
+.rich-editor__content :deep(.rich-editor-table-node.is-resizing > .rich-editor-table-node__controls),
+.rich-editor__content :deep(.rich-editor-table-node:focus-within > .rich-editor-table-node__controls) { display: block; }
+.rich-editor__content :deep(.rich-editor-table-node__controls button) { touch-action: none; user-select: none; }
+.rich-editor__content :deep(.rich-editor-table-node__handle) { position: absolute; z-index: 5; width: 11px; height: 11px; padding: 0; border: 2px solid #fff; border-radius: 2px; background: #2563eb; box-shadow: 0 0 0 1px #2563eb; cursor: nwse-resize; }
+.rich-editor__content :deep(.rich-editor-table-node__column-handle) { position: absolute; top: 0; z-index: 2; width: 7px; padding: 0; border: 0; transform: translateX(-3px); background: transparent; cursor: col-resize; }
+.rich-editor__content :deep(.rich-editor-table-node__row-handle) { position: absolute; left: 0; z-index: 3; height: 7px; padding: 0; border: 0; transform: translateY(-3px); background: transparent; cursor: row-resize; }
+.rich-editor__content :deep(.rich-editor-table-node__column-handle:hover),
+.rich-editor__content :deep(.rich-editor-table-node__row-handle:hover) { background: rgb(59 130 246 / 25%); }
+.rich-editor__content :deep(.rich-editor-table-node__toolbar) { position: absolute; left: 0; top: -25px; display: flex; gap: 5px; }
+.rich-editor__content :deep(.rich-editor-table-node__toolbar button) { border: 1px solid #cbd5e1; border-radius: 4px; background: #fff; color: #475569; padding: 2px 6px; cursor: pointer; font-size: 11px; }
+.rich-editor__content :deep(.rich-editor-table-node__size) { position: absolute; right: 0; bottom: -17px; color: #64748b; font-size: 10px; white-space: nowrap; }
 .rich-editor__content :deep(.tiptap td),
-.rich-editor__content :deep(.tiptap th) { min-width: 40px; padding: 5px 7px; border: 1px solid #cbd5e1; vertical-align: top; }
+.rich-editor__content :deep(.tiptap th) { padding: 5px 7px; border: 1px solid #cbd5e1; vertical-align: top; overflow-wrap: anywhere; }
+.rich-editor__content :deep(.tiptap td p:last-child),
+.rich-editor__content :deep(.tiptap th p:last-child) { margin-bottom: 0; }
 .rich-editor__content :deep(.math-node) {
   display: inline-block;
   min-width: 2px;

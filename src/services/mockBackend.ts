@@ -25,6 +25,8 @@ import type {
   Question,
   QuestionBatchEditRequest,
   QuestionBatchEditResult,
+  QuestionDuplicateMergeRequest,
+  QuestionDuplicateMergeReceipt,
   QuestionDraft,
   QuestionDraftRecord,
   QuestionDuplicateBatchRequest,
@@ -232,6 +234,7 @@ let preparedDataMove: DataMovePlan | null = null
 let lastDataMoveResult: DataMoveResult | null = null
 let mockDataRoot = 'C:\\Users\\Teacher\\Documents\\教师题库'
 const managedImages = new Map<string, ManagedImagePayload>()
+const duplicateMergeUndo = new Map<string, { receipt: QuestionDuplicateMergeReceipt; members: Question[]; mergedAt: number; mergedTags: string[] }>()
 const managedImageIdsByContent = new Map<string, string>()
 
 const WORD_IMPORT_DRAFT_STORAGE_KEY = 'zhitiku-preview-word-import-draft'
@@ -1138,10 +1141,6 @@ export const mockBackend = {
       databaseHealthy: true,
       appVersion: __APP_VERSION__,
     }
-  },
-
-  async listQuestionTypes(): Promise<QuestionTypeDefinition[]> {
-    return clone(questionTypes).sort((left, right) => left.sortOrder - right.sortOrder)
   },
 
   async saveQuestionType(request: SaveQuestionTypeRequest): Promise<QuestionTypeDefinition> {
@@ -2412,12 +2411,6 @@ export const mockBackend = {
     return record ? questionDraftWithStale(record) : null
   },
 
-  async listQuestionDrafts(): Promise<QuestionDraftRecord[]> {
-    return questionDrafts
-      .map(questionDraftWithStale)
-      .sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id))
-  },
-
   async saveQuestionDraft(input: QuestionDraft): Promise<QuestionDraftRecord> {
     const payload = normalizedQuestionDraft(input)
     const draftKey = questionDraftKey(payload.questionId)
@@ -2665,21 +2658,6 @@ export const mockBackend = {
     return saved
   },
 
-  async saveQuestions(drafts: QuestionDraft[]): Promise<Question[]> {
-    if (!drafts.length) taxonomyError('请至少录入一道题目。')
-    if (drafts.length > 100) taxonomyError('文档式录入一次最多保存 100 道题目。')
-    const snapshot = clone(questions)
-    const saved: Question[] = []
-    try {
-      for (const draft of drafts) saved.push(await this.saveQuestion(draft))
-      return saved
-    } catch (reason) {
-      questions = snapshot
-      persist()
-      throw reason
-    }
-  },
-
   async saveImportedQuestions(drafts: QuestionDraft[]): Promise<string[]> {
     if (!drafts.length) taxonomyError('请至少导入一道题目。')
     if (drafts.length > 100) taxonomyError('批量导入一次最多保存 100 道题目。')
@@ -2907,6 +2885,42 @@ export const mockBackend = {
     }
   },
 
+  async mergeQuestionDuplicates(request: QuestionDuplicateMergeRequest): Promise<QuestionDuplicateMergeReceipt> {
+    if (request.members.length < 2 || request.members.length > 500 || new Set(request.members.map(m => m.id)).size !== request.members.length || !request.members.some(m => m.id === request.keeperId)) throw new Error('重复题归并范围无效')
+    const members = request.members.map(target => {
+      const question = questions.find(q => q.id === target.id)
+      if (!question || question.deletedAt || question.contentVersion !== target.expectedContentVersion) throw new Error('题目已变更，请重新查重')
+      return question
+    })
+    if (request.duplicateKind === 'exact' && (!members.every(canCompareExact) || new Set(members.map(normalizedExactQuestion)).size !== 1)) throw new Error('题目已不是完全重复，请重新查重')
+    const mergedTags = [...new Map(members.flatMap(q => q.tags).map(tag => [tag.id, tag])).values()]
+    if (mergedTags.length > 100) throw new Error('归并后标签超过 100 个，本组题目未作改动')
+    const receipt = { id: crypto.randomUUID(), keeperId: request.keeperId, recycledCount: members.length - 1, mergedTagCount: mergedTags.length }
+    const mergedAt = Date.now()
+    duplicateMergeUndo.set(receipt.id, { receipt, members: clonePlain(members), mergedAt, mergedTags: mergedTags.map(t => t.id).sort() })
+    const ids = new Set(members.map(q => q.id))
+    questions = questions.map(q => !ids.has(q.id) ? q : { ...q, tags: q.id === request.keeperId ? mergedTags : q.tags, deletedAt: q.id === request.keeperId ? null : mergedAt, updatedAt: mergedAt, contentVersion: q.contentVersion + 1 })
+    persist()
+    return receipt
+  },
+  async latestQuestionDuplicateMerge(): Promise<QuestionDuplicateMergeReceipt | null> {
+    return [...duplicateMergeUndo.values()].at(-1)?.receipt ?? null
+  },
+  async undoQuestionDuplicateMerge(id: string): Promise<void> {
+    const record = duplicateMergeUndo.get(id)
+    if (!record) throw new Error('归并记录不存在或已撤销')
+    for (const original of record.members) {
+      const current = questions.find(q => q.id === original.id)
+      if (!current || current.contentVersion !== original.contentVersion + 1 || current.updatedAt !== record.mergedAt || current.deletedAt !== (current.id === record.receipt.keeperId ? null : record.mergedAt)) throw new Error('归并后的题目已变更，无法整体撤销')
+      if (current.id === record.receipt.keeperId && JSON.stringify(current.tags.map(t => t.id).sort()) !== JSON.stringify(record.mergedTags)) throw new Error('归并后的标签已变更')
+    }
+    const originals = new Map(record.members.map(q => [q.id, q]))
+    questions = questions.map(q => {
+      const original = originals.get(q.id)
+      return original ? { ...q, tags: original.tags, deletedAt: null, updatedAt: Date.now(), contentVersion: q.contentVersion + 1 } : q
+    })
+    duplicateMergeUndo.delete(id); persist()
+  },
   async moveQuestionsToRecycle(ids: string[]): Promise<void> {
     const deletedAt = Date.now()
     questions = questions.map((question) => ids.includes(question.id) ? { ...question, deletedAt, updatedAt: deletedAt } : question)
@@ -2922,10 +2936,6 @@ export const mockBackend = {
     questions = questions.filter((question) => !(ids.includes(question.id) && question.deletedAt))
     pruneDuplicateIgnores()
     persist()
-  },
-
-  async saveImportedQuestion(draft: QuestionDraft): Promise<Question> {
-    return this.saveQuestion(draft)
   },
 
   async getSettings(): Promise<AppSettings> {

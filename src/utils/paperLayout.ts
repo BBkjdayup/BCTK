@@ -8,6 +8,7 @@ import {
   type IEditorOption,
   type IElement,
 } from '@hufe921/canvas-editor'
+import { fitTableColumns, tablePixelSize } from './tableGeometry'
 import {
   QUESTION_TYPE_LABELS,
   type Paper,
@@ -39,10 +40,6 @@ export interface PaperCanvasFormulaReference {
   nodeId?: string
   ordinal: number
   sourceLatex: string
-}
-
-export interface PaperCanvasFormulaExtension extends PaperCanvasFormulaReference {
-  renderScaleVersion?: number
 }
 
 export interface PaperCanvasFormulaChange {
@@ -548,7 +545,24 @@ function legacyHtmlElements(
   root.querySelectorAll<HTMLImageElement>('img').forEach((image) => {
     prepareHtmlImage(document, image, imageSources)
   })
+  root.querySelectorAll<HTMLTableElement>('table').forEach((table) => {
+    const columns = Array.from(table.querySelectorAll<HTMLTableColElement>(':scope > colgroup > col'))
+    const widths = columns.map((col) => tablePixelSize(col.getAttribute('width'))
+      ?? (/px$/.test(col.style.width) ? tablePixelSize(Number.parseFloat(col.style.width)) : null))
+    const width = tablePixelSize(table.dataset.tableWidth)
+      ?? (/px$/.test(table.style.width) ? tablePixelSize(Number.parseFloat(table.style.width)) : null)
+      ?? (widths.length && widths.every(Boolean) ? widths.reduce<number>((total, value) => total + (value ?? 0), 0) : null)
+    if (!width || !columns.length) return
+    // canvas-editor reads the width attribute, whereas Tiptap serializes col styles.
+    const fitted = fitTableColumns(widths.map((value) => value ?? width / columns.length), Math.min(width, LEGACY_HTML_INNER_WIDTH))
+    columns.forEach((col, index) => {
+      col.setAttribute('width', String(fitted[index]))
+      col.style.width = `${fitted[index]}px`
+    })
+  })
   root.querySelectorAll<HTMLTableRowElement>('table tr').forEach((row) => {
+    const height = tablePixelSize(row.dataset.rowMinHeight)
+    if (height) row.style.height = `${height}px`
     if (!positiveNumber(row.style.height)) row.style.height = '32px'
   })
   const formulas: FormulaToken[] = []

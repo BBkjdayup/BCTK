@@ -3,6 +3,7 @@
 //! Flattening all `m:t` nodes loses fraction bars, roots and scripts while
 //! producing plausible-looking but mathematically different expressions.
 
+#[cfg(test)]
 use std::io::{Read, Seek};
 
 use quick_xml::{
@@ -11,8 +12,15 @@ use quick_xml::{
 };
 
 use super::{
-    DocxError, DocxLimits, DocxResult, read_document_from_docx,
+    DocxError, DocxResult,
+    document::ParsedDocument,
     xml::{decode_reference, local_name},
+};
+
+#[cfg(test)]
+use super::{
+    DocxLimits,
+    package::{ValidatedPackage, read_package_bytes},
 };
 
 const OMML_PART: &str = "word/document.xml OMML";
@@ -27,14 +35,22 @@ pub struct ExtractedEditableFormulaOccurrence {
     pub product_subversion: u8,
 }
 
+#[cfg(test)]
 pub fn read_omml_from_docx<R: Read + Seek>(
     source: R,
     limits: &DocxLimits,
 ) -> DocxResult<Vec<ExtractedEditableFormulaOccurrence>> {
-    let parsed = read_document_from_docx(source, limits)?;
+    let bytes = read_package_bytes(source, limits)?;
+    let parsed = ValidatedPackage::open(&bytes, limits)?.read_document()?;
+    read_omml_from_document(&parsed)
+}
+
+pub(crate) fn read_omml_from_document(
+    parsed: &ParsedDocument,
+) -> DocxResult<Vec<ExtractedEditableFormulaOccurrence>> {
     parsed
         .math_fragments
-        .into_iter()
+        .iter()
         .map(|fragment| {
             let paragraph_index = fragment
                 .paragraph_index
@@ -208,7 +224,7 @@ fn ends_in_control_word(text: &str) -> bool {
 }
 
 fn script_base(base: String) -> String {
-    if base.chars().count() == 1 || base.starts_with('\\') {
+    if base.chars().count() == 1 {
         base
     } else {
         format!("{{{base}}}")
@@ -229,11 +245,23 @@ fn render_omml(node: &OmmlNode) -> DocxResult<String> {
         "oMath" | "oMathPara" | "e" | "num" | "den" | "sup" | "sub" | "deg" | "fName" | "mr"
         | "r" => render_children(node),
         "t" => Ok(unicode_math_text_to_latex(&node.text)),
-        "f" => Ok(format!(
-            r"\frac{{{}}}{{{}}}",
-            render_omml(node.required_child("num")?)?,
-            render_omml(node.required_child("den")?)?,
-        )),
+        "f" => {
+            let numerator = render_omml(node.required_child("num")?)?;
+            let denominator = render_omml(node.required_child("den")?)?;
+            let kind = node
+                .child("fPr")
+                .and_then(|p| p.child("type"))
+                .and_then(|p| p.value.as_deref())
+                .unwrap_or("bar");
+            match kind {
+                "bar" => Ok(format!(r"\frac{{{numerator}}}{{{denominator}}}")),
+                "noBar" => Ok(format!(
+                    r"\genfrac{{}}{{}}{{0pt}}{{}}{{{numerator}}}{{{denominator}}}"
+                )),
+                "lin" | "skw" => Ok(format!(r"{{{numerator}}}/{{{denominator}}}")),
+                other => Err(invalid_omml(format!("unsupported fraction type: {other}"))),
+            }
+        }
         "rad" => {
             let radicand = render_omml(node.required_child("e")?)?;
             let degree = node
@@ -428,6 +456,101 @@ fn invalid_omml(message: impl Into<String>) -> DocxError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_no_bar_fractions_and_rejects_unknown_fraction_types() {
+        for (kind, expected) in [
+            ("noBar", Some(r"\genfrac{}{}{0pt}{}{5}{2}")),
+            ("bar", Some(r"\frac{5}{2}")),
+            ("unknown", None),
+        ] {
+            let xml = format!(
+                r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:f><m:fPr><m:type m:val="{kind}"/></m:fPr><m:num><m:r><m:t>5</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:oMath>"#
+            );
+            let result = convert_omml_to_latex(xml.as_bytes());
+            match expected {
+                Some(expected) => assert_eq!(result.unwrap(), expected),
+                None => assert!(result.is_err()),
+            }
+        }
+    }
+
+    #[test]
+    fn checked_formula_export_rejects_lossy_or_malformed_input() {
+        // Exercise the production dependency in the desktop test suite, so a
+        // vendor update cannot bypass these checks by skipping dependency tests.
+        for latex in [
+            r"\unknown{x}",
+            r"\frac{1}",
+            r"\frac{1}{2",
+            "x}",
+            "x^",
+            "x^2^3",
+            r"\left(x+1",
+            r"\right)",
+            r"\begin{matrix}1&2",
+            r"\begin{unknown}x\end{unknown}",
+            r"\mathbf{\frac{1}{2}}",
+            r"\genfrac{}{}{2pt}{}{1}{2}",
+            r"\cfrac[l]{1}{2}",
+            r"\sqrt[3{x}",
+            "x\u{0001}y",
+            "",
+            "{}",
+            r"\begin{matrix}\unknown{x}\end{matrix}",
+        ] {
+            assert!(
+                tex2word_math::try_to_omath(latex).is_err(),
+                "must reject {latex:?}"
+            );
+        }
+        assert!(tex2word_math::try_to_omath(&"{".repeat(200)).is_err());
+        assert!(tex2word_math::try_to_omath(&"x".repeat(65 * 1024)).is_err());
+    }
+
+    #[test]
+    fn checked_formula_export_keeps_supported_math_structures() {
+        for (latex, marker) in [
+            (r"\frac {1}{2}", "<m:f>"),
+            (r"\sqrt[3]{x}", "<m:rad>"),
+            (r"x_i^2", "<m:sSubSup>"),
+            (r"\sum_{i=1}^{n}{i^2}", "<m:nary>"),
+            (r"\left(\frac{1}{2}\right)", "<m:d>"),
+            (r"\begin{matrix}1&2\\3&4\end{matrix}", "<m:m>"),
+            (r"\begin{aligned}x&=1\\y&=2\end{aligned}", "<m:m>"),
+            (r"\begin{align*}x&=1\end{align*}", "<m:m>"),
+            (r"\binom{5}{2}", "<m:d>"),
+            (r"\text{if x > 0}", "if x &gt; 0"),
+        ] {
+            let xml = tex2word_math::try_to_omath(latex)
+                .unwrap_or_else(|error| panic!("{latex}: {error}"));
+            assert!(xml.contains(marker), "{latex}: {xml}");
+        }
+        let source = r"\genfrac{}{}{0pt}{}{\frac{1}{2}}{\sqrt{3}}";
+        let xml = tex2word_math::try_to_omath(source).unwrap();
+        assert!(xml.contains(r#"<m:type m:val="noBar"/>"#));
+        assert!(
+            !xml.contains("<m:d>"),
+            "no-bar fraction must not acquire binomial parentheses"
+        );
+        assert!(!xml.contains("<m:t>0pt"));
+        assert_eq!(convert_omml_to_latex(xml.as_bytes()).unwrap(), source);
+        let nested = tex2word_math::try_to_omath(
+            r"\begin{matrix}\begin{matrix}1&2\\3&4\end{matrix}&5\end{matrix}",
+        )
+        .unwrap();
+        assert_eq!(nested.matches("<m:m>").count(), 2);
+        assert_eq!(nested.matches("<m:mr>").count(), 3);
+    }
+
+    #[test]
+    fn groups_nested_command_scripts() {
+        let xml = r#"<m:oMath xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><m:sSup><m:e><m:sSup><m:e><m:r><m:t>α</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:e><m:sup><m:r><m:t>3</m:t></m:r></m:sup></m:sSup></m:oMath>"#;
+        assert_eq!(
+            convert_omml_to_latex(xml.as_bytes()).unwrap(),
+            r"{{\alpha}^{2}}^{3}"
+        );
+    }
 
     #[test]
     fn converts_the_three_native_word_formula_shapes_from_the_math_exam() {

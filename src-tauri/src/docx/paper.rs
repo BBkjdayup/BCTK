@@ -1122,7 +1122,13 @@ fn rich_paragraph_xml(
                 xml.push_str(&text_run_xml(&run.text, Some(run), prototype, invalid));
             }
             PaperInline::Formula { latex } => {
-                let formula = tex2word_math::to_omath(latex);
+                let formula = tex2word_math::try_to_omath(latex).map_err(|message| {
+                    DocxError::rejected(vec![Diagnostic::error(
+                        "PAPER_EXPORT_FORMULA_UNSUPPORTED",
+                        Some(DOCUMENT_PART),
+                        message,
+                    )])
+                })?;
                 xml.push_str(&formula.replacen(
                     "<m:oMath>",
                     "<m:oMath xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">",
@@ -1258,15 +1264,67 @@ fn rich_table_xml(
     let mut xml = String::new();
     xml.push_str("<ztw:tbl xmlns:ztw=\"");
     xml.push_str(namespace);
-    xml.push_str("\"><ztw:tblPr><ztw:tblW ztw:w=\"0\" ztw:type=\"auto\"/><ztw:tblBorders><ztw:top ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:left ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:bottom ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:right ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:insideH ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:insideV ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/></ztw:tblBorders></ztw:tblPr><ztw:tblGrid>");
-    for _ in 0..column_count {
-        xml.push_str("<ztw:gridCol ztw:w=\"1440\"/>");
+    xml.push_str("\"><ztw:tblPr>");
+    let stored_columns =
+        (table.column_widths_px.len() == column_count).then_some(&table.column_widths_px);
+    let width = table
+        .width_px
+        .or_else(|| stored_columns.map(|columns| columns.iter().sum::<u32>().min(10_000)));
+    let columns_twips = if let Some(width) = width {
+        xml.push_str(&format!(
+            "<ztw:tblW ztw:w=\"{}\" ztw:type=\"dxa\"/><ztw:tblLayout ztw:type=\"fixed\"/>",
+            width * 15
+        ));
+        let weights = stored_columns
+            .cloned()
+            .unwrap_or_else(|| vec![1; column_count]);
+        let total: u32 = weights.iter().sum();
+        // Cumulative rounding keeps the exact table width even for uneven columns.
+        let mut cumulative = 0u64;
+        let mut previous = 0u32;
+        weights
+            .iter()
+            .map(|weight| {
+                cumulative += u64::from(*weight) * u64::from(width) * 15;
+                let edge = ((cumulative + u64::from(total) / 2) / u64::from(total)) as u32;
+                let column = edge - previous;
+                previous = edge;
+                column
+            })
+            .collect::<Vec<_>>()
+    } else {
+        xml.push_str("<ztw:tblW ztw:w=\"0\" ztw:type=\"auto\"/>");
+        vec![1440; column_count]
+    };
+    xml.push_str("<ztw:tblBorders><ztw:top ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:left ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:bottom ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:right ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:insideH ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/><ztw:insideV ztw:val=\"single\" ztw:sz=\"4\" ztw:color=\"000000\"/></ztw:tblBorders></ztw:tblPr><ztw:tblGrid>");
+    for column_width in &columns_twips {
+        xml.push_str(&format!("<ztw:gridCol ztw:w=\"{column_width}\"/>"));
     }
     xml.push_str("</ztw:tblGrid>");
     for row in &table.rows {
         xml.push_str("<ztw:tr>");
+        if let Some(height) = row.min_height_px {
+            xml.push_str(&format!(
+                "<ztw:trPr><ztw:trHeight ztw:val=\"{}\" ztw:hRule=\"atLeast\"/></ztw:trPr>",
+                height * 15
+            ));
+        }
+        let mut column_index = 0usize;
         for cell in &row.cells {
-            xml.push_str("<ztw:tc><ztw:tcPr><ztw:tcW ztw:w=\"0\" ztw:type=\"auto\"/>");
+            xml.push_str("<ztw:tc><ztw:tcPr>");
+            if width.is_some() {
+                let cell_width: u32 = columns_twips
+                    .iter()
+                    .skip(column_index)
+                    .take(cell.column_span as usize)
+                    .sum();
+                xml.push_str(&format!(
+                    "<ztw:tcW ztw:w=\"{cell_width}\" ztw:type=\"dxa\"/>"
+                ));
+            } else {
+                xml.push_str("<ztw:tcW ztw:w=\"0\" ztw:type=\"auto\"/>");
+            }
+            column_index += cell.column_span as usize;
             if cell.column_span > 1 {
                 xml.push_str(&format!("<ztw:gridSpan ztw:val=\"{}\"/>", cell.column_span));
             }
@@ -1558,6 +1616,34 @@ mod tests {
                 .any(|item| item.code == "PAPER_EXPORT_RICH_CONTENT_WRITTEN")
         );
         super::super::parse_document_xml(xml.as_bytes(), &DocxLimits::default()).unwrap();
+    }
+
+    #[test]
+    fn resized_table_round_trips_dimensions_through_word_xml() {
+        let parsed = super::super::parse_rich_content(
+            r#"<table data-table-width="360"><colgroup><col style="width: 120px"><col style="width: 240px"></colgroup><tbody><tr data-row-min-height="64"><td colspan="2"><p>merged <span class="math-node" data-latex="x^2">x^2</span></p></td></tr><tr style="height: 96px"><td><p>I/A</p></td><td><p>0.20</p></td></tr></tbody></table>"#,
+            "",
+        );
+        assert!(parsed.unsupported.is_empty());
+        let PaperBlock::Table(table) = &parsed.content.blocks[0] else {
+            panic!("missing table");
+        };
+        let namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+        let xml = rich_table_xml(namespace, table, None, &BTreeMap::new(), &mut 0, &mut 1).unwrap();
+        assert!(xml.contains("ztw:hRule=\"atLeast\""));
+        assert!(xml.contains("<ztw:gridSpan ztw:val=\"2\"/>"));
+        assert!(xml.contains("<ztw:tcW ztw:w=\"5400\" ztw:type=\"dxa\"/>"));
+        assert!(xml.contains("<m:oMath"));
+        assert!(!xml.contains("exact"));
+        let document =
+            format!("<w:document xmlns:w=\"{namespace}\"><w:body>{xml}</w:body></w:document>");
+        let imported =
+            super::super::parse_document_xml(document.as_bytes(), &DocxLimits::default()).unwrap();
+        assert_eq!(imported.tables[0].width_px, Some(360));
+        assert_eq!(imported.tables[0].column_widths_px, [120, 240]);
+        assert_eq!(imported.tables[0].row_min_heights_px, [Some(64), Some(96)]);
+        assert_eq!(imported.tables[0].rows[0].len(), 1);
+        assert_eq!(imported.tables[0].rows[1].len(), 2);
     }
 
     #[test]

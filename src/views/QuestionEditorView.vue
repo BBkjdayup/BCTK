@@ -7,6 +7,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Delete, Check, DocumentAdd, UploadFilled } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import RichTextEditor from '../components/RichTextEditor.vue'
+import FormulaCompatibilityNotice from '../components/FormulaCompatibilityNotice.vue'
+import { questionFormulaFields } from '../utils/formulaCompatibility'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { useAppStore } from '../stores/app'
 import { useQuestionBankStore } from '../stores/questionBank'
@@ -605,6 +607,7 @@ async function save() {
 
 <template>
   <section class="page-main editor-page" @input="touch" @change="touch">
+    <FormulaCompatibilityNotice :fields="questionFormulaFields(draft)" />
     <div class="editor-actions-bar" role="toolbar" aria-label="题目保存操作">
       <div class="autosave-status">
         <span class="status-dot" />

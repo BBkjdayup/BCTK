@@ -8,6 +8,8 @@ import { UploadFilled, Document, CircleCheck, Warning, Delete } from '@element-p
 import AppContextMenu from '../components/AppContextMenu.vue'
 import RichContentView from '../components/RichContentView.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
+import FormulaCompatibilityNotice from '../components/FormulaCompatibilityNotice.vue'
+import { questionFormulaFields } from '../utils/formulaCompatibility'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { backend, isDesktopRuntime } from '../services/backend'
 import { errorMessage } from '../services/errors'
@@ -206,7 +208,7 @@ const importSessionId = ref<string | null>(null)
 const pendingImageOccurrences = ref<DocxImageOccurrence[]>([])
 const pendingFormulaOccurrences = ref<DocxFormulaOccurrence[]>([])
 const pendingTableOccurrences = ref<DocxTableOccurrence[]>([])
-const CURRENT_WORD_IMPORT_PARSER_VERSION = 'w1-ooxml-images-formulas-tables-10'
+const CURRENT_WORD_IMPORT_PARSER_VERSION = 'w1-ooxml-images-formulas-tables-11'
 const CURRENT_EXCEL_IMPORT_PARSER_VERSION = 'xlsx-text-v2'
 const parserVersion = ref(CURRENT_WORD_IMPORT_PARSER_VERSION)
 const desktopAvailable = isDesktopRuntime()
@@ -215,6 +217,44 @@ const reviewPersistenceAvailable = computed(() => (
   canPersistWordImportReview(desktopAvailable, isDocumentEntryReview.value)
 ))
 let timer: ReturnType<typeof setInterval> | undefined
+const recognitionTaskId = ref<string | null>(null)
+const recognitionTask = ref<Awaited<ReturnType<typeof backend.backgroundTaskProgress>> | null>(null)
+const recognitionCancelRequested = ref(false)
+function startRecognitionProgress() {
+  const id = crypto.randomUUID()
+  recognitionTaskId.value = id; recognitionTask.value = null; recognitionCancelRequested.value = false
+  progress.value = 0
+  let polling = false
+  const interval = setInterval(async () => {
+    if (polling || recognitionTaskId.value !== id) return
+    polling = true
+    try {
+      const state = await backend.backgroundTaskProgress(id)
+      if (recognitionTaskId.value !== id) return
+      recognitionTask.value = state
+      progress.value = state.total ? Math.min(99, Math.floor(100 * state.completed / state.total)) : 0
+    } catch { /* The running command remains authoritative if progress polling fails. */ }
+    finally { polling = false }
+  }, 400)
+  timer = interval
+  return { id, interval }
+}
+async function cancelRecognition() {
+  const id = recognitionTaskId.value
+  if (!id || recognitionCancelRequested.value) return
+  recognitionCancelRequested.value = true
+  try { await backend.cancelBackgroundTask(id) }
+  catch (reason) {
+    recognitionCancelRequested.value = false
+    ElMessage.error(errorMessage(reason, '取消请求未成功，请重试'))
+  }
+}
+function recognitionWasCancelled(reason: unknown) {
+  if ((reason as { code?: string } | null)?.code !== 'TASK_CANCELLED') return false
+  step.value = 0
+  ElMessage.info('已取消识别，没有创建新草稿。')
+  return true
+}
 let prepareReviewTimer: ReturnType<typeof setTimeout> | undefined
 let autosaveTimer: ReturnType<typeof setInterval> | undefined
 let unlistenCloseRequested: UnlistenFn | undefined
@@ -224,6 +264,8 @@ let resolveDuplicateAction: ((action: DuplicateAction | null) => void) | undefin
 let activeDuplicateScans = 0
 let duplicateDialogRequest = 0
 let lastSavedReviewSnapshot: string | null = null
+let draftSaveTask: Promise<void> | null = null
+let draftDeleteTask: Promise<void> | null = null
 let recognitionRequest = 0
 let draftRecoveryRequest = 0
 let duplicateScanGeneration = 0
@@ -651,16 +693,10 @@ async function startDesktopRecognition(path: string) {
   pendingFormulaOccurrences.value = []
   pendingTableOccurrences.value = []
   parseLogs.value = ['正在验证 Open XML 文件结构与安全边界…']
-  const progressTimer = setInterval(() => {
-    if (!componentActive || request !== recognitionRequest || step.value !== 1) {
-      clearInterval(progressTimer)
-      return
-    }
-    progress.value = Math.min(88, progress.value + 3)
-  }, 350)
-  timer = progressTimer
+  const task = startRecognitionProgress()
+  const progressTimer = task.interval
   try {
-    const started: BeginWordImportResult = await backend.beginWordImport(path)
+    const started: BeginWordImportResult = await backend.beginWordImport(path, task.id)
     if (!componentActive || request !== recognitionRequest || step.value !== 1) return
     const result = started.analysis
     analysis.value = result
@@ -710,8 +746,10 @@ async function startDesktopRecognition(path: string) {
     }, 250)
   } catch (reason) {
     if (!componentActive || request !== recognitionRequest || step.value !== 1) return
+    if (recognitionWasCancelled(reason)) return
     showRecognitionError(reason, 'docx')
   } finally {
+    if (recognitionTaskId.value === task.id) recognitionTaskId.value = null
     clearInterval(progressTimer)
     if (timer === progressTimer) timer = undefined
   }
@@ -966,16 +1004,10 @@ async function startExcelRecognition(path: string) {
   pendingFormulaOccurrences.value = []
   pendingTableOccurrences.value = []
   parseLogs.value = ['正在验证 Excel 文件结构、大小与安全边界…']
-  const progressTimer = setInterval(() => {
-    if (!componentActive || request !== recognitionRequest || step.value !== 1) {
-      clearInterval(progressTimer)
-      return
-    }
-    progress.value = Math.min(88, progress.value + 4)
-  }, 350)
-  timer = progressTimer
+  const task = startRecognitionProgress()
+  const progressTimer = task.interval
   try {
-    const started: BeginExcelImportResult = await backend.beginExcelImport(path, selectedExcelSheet.value)
+    const started: BeginExcelImportResult = await backend.beginExcelImport(path, selectedExcelSheet.value, task.id)
     if (!componentActive || request !== recognitionRequest || step.value !== 1) return
     importSessionId.value = started.draft.payload.importSessionId ?? null
     parserVersion.value = started.draft.payload.parserVersion
@@ -1002,8 +1034,10 @@ async function startExcelRecognition(path: string) {
     }, 180)
   } catch (reason) {
     if (!componentActive || request !== recognitionRequest || step.value !== 1) return
+    if (recognitionWasCancelled(reason)) return
     showRecognitionError(reason, 'xlsx')
   } finally {
+    if (recognitionTaskId.value === task.id) recognitionTaskId.value = null
     clearInterval(progressTimer)
     if (timer === progressTimer) timer = undefined
   }
@@ -1325,40 +1359,49 @@ function updatePendingDraftCount(delta: number) {
 }
 
 async function autosaveWordImportDraft(showFailure = true, force = false) {
+  if (draftDeleteTask) return false
   if (!draftReady.value || step.value !== 2 || !selectedFile.value) return true
-  if (draftAutosaving.value || (saving.value && !force)) return false
-  if (!draftDirty.value && !force) return true
-
-  const snapshot = reviewSnapshot()
-  if (!force && snapshot === lastSavedReviewSnapshot) {
-    draftDirty.value = false
-    return true
-  }
-
-  draftAutosaving.value = true
+  if (saving.value && !force) return false
   try {
-    const saved = await withTimeout(
-      backend.saveWordImportDraft(buildWordImportDraftPayload()),
-      IMPORT_DRAFT_TIMEOUT_MS,
-      '批量导入草稿保存超时，请稍后重试。',
-    )
-    if (!hasPersistedDraft.value) updatePendingDraftCount(1)
-    hasPersistedDraft.value = true
-    lastDraftAutosavedAt.value = saved.autosavedAt
-    if (snapshot === reviewSnapshot()) {
-      lastSavedReviewSnapshot = snapshot
-      draftDirty.value = false
-    } else {
-      draftDirty.value = true
+    if (!draftSaveTask) {
+      if (!draftDirty.value && !force) return true
+      draftAutosaving.value = true
+      // Keep the actual write pending even if a caller times out. Starting a
+      // second write (or deleting the draft) before it settles can restore stale data.
+      draftSaveTask = (async () => {
+        do {
+          const snapshot = reviewSnapshot()
+          if (!force && snapshot === lastSavedReviewSnapshot) {
+            draftDirty.value = false
+            return
+          }
+          const saved = await backend.saveWordImportDraft(buildWordImportDraftPayload())
+          if (!hasPersistedDraft.value) updatePendingDraftCount(1)
+          hasPersistedDraft.value = true
+          lastDraftAutosavedAt.value = saved.autosavedAt
+          lastSavedReviewSnapshot = snapshot
+          draftDirty.value = snapshot !== reviewSnapshot()
+          force = false
+        } while (draftDirty.value)
+      })().catch(reason => {
+        draftDirty.value = true
+        throw reason
+      }).finally(() => {
+        draftSaveTask = null
+        draftAutosaving.value = false
+      })
     }
-    return true
+    await withTimeout(
+      draftSaveTask,
+      IMPORT_DRAFT_TIMEOUT_MS,
+      '批量导入草稿保存超时，仍在等待本地写入。请留在本页，完成后再离开。',
+    )
+    return !draftDirty.value
   } catch (reason) {
     if (showFailure) {
       ElMessage.error(errorMessage(reason, '批量导入草稿保存失败，请检查本地数据库。'))
     }
     return false
-  } finally {
-    draftAutosaving.value = false
   }
 }
 
@@ -1375,15 +1418,24 @@ async function saveDraftManually() {
 }
 
 async function deletePersistedWordImportDraft() {
+  if (draftSaveTask) await withTimeout(draftSaveTask, IMPORT_DRAFT_TIMEOUT_MS, '草稿仍在写入，暂时不能删除。')
+  if (!draftDeleteTask) {
+    draftAutosaving.value = true
+    draftDeleteTask = backend.deleteWordImportDraft().then(() => {
+      if (hasPersistedDraft.value) updatePendingDraftCount(-1)
+      hasPersistedDraft.value = false
+      lastDraftAutosavedAt.value = null
+      lastSavedReviewSnapshot = null
+    }).finally(() => {
+      draftDeleteTask = null
+      draftAutosaving.value = false
+    })
+  }
   await withTimeout(
-    backend.deleteWordImportDraft(),
+    draftDeleteTask,
     IMPORT_DRAFT_TIMEOUT_MS,
     '批量导入草稿清理超时，请稍后重试。',
   )
-  if (hasPersistedDraft.value) updatePendingDraftCount(-1)
-  hasPersistedDraft.value = false
-  lastDraftAutosavedAt.value = null
-  lastSavedReviewSnapshot = null
   importSessionId.value = null
   pendingImageOccurrences.value = []
   pendingFormulaOccurrences.value = []
@@ -1588,7 +1640,7 @@ async function discardUnreadableWordImportDraft() {
 }
 
 function warnBeforeBrowserClose(event: BeforeUnloadEvent) {
-  if (!draftDirty.value && !saving.value && !draftAutosaving.value) return
+  if (!draftDirty.value && !saving.value && !draftAutosaving.value && !recognitionTaskId.value) return
   event.preventDefault()
   event.returnValue = ''
 }
@@ -1596,11 +1648,16 @@ function warnBeforeBrowserClose(event: BeforeUnloadEvent) {
 async function registerCloseProtection() {
   window.addEventListener('beforeunload', warnBeforeBrowserClose)
   unlistenCloseRequested = registerCloseGuard(async () => {
+    if (recognitionTaskId.value) {
+      ElMessage.info('文件仍在识别或保存，请等待完成，或先取消识别。')
+      return false
+    }
     if (!draftDirty.value && !saving.value && !draftAutosaving.value) return true
-    if (saving.value || draftAutosaving.value) {
+    if (saving.value || draftDeleteTask) {
       ElMessage.warning('正在保存导入内容，请等待完成后再关闭软件。')
       return false
     }
+    if (draftSaveTask) return await autosaveWordImportDraft()
     if (closePromptOpen) return false
     closePromptOpen = true
     try {
@@ -1629,6 +1686,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  if (recognitionTaskId.value) void backend.cancelBackgroundTask(recognitionTaskId.value).catch(() => undefined)
   componentActive = false
   recognitionRequest += 1
   draftRecoveryRequest += 1
@@ -1645,6 +1703,10 @@ onBeforeUnmount(() => {
 })
 
 onBeforeRouteLeave(async () => {
+  if (recognitionTaskId.value) {
+    ElMessage.info('文件仍在识别或保存，请等待完成，或先取消识别。')
+    return false
+  }
   if (recoveryChecking.value) {
     ElMessage.info('请先完成未完成草稿检查，再离开批量导入页面。')
     return false
@@ -1653,10 +1715,11 @@ onBeforeRouteLeave(async () => {
     ElMessage.warning('正在写入题库，请等待本次导入结束后再离开。')
     return false
   }
-  if (draftAutosaving.value) {
+  if (draftDeleteTask) {
     ElMessage.info('本地草稿正在保存，请等待完成后再离开。')
     return false
   }
+  if (draftSaveTask) return await autosaveWordImportDraft()
   if (!draftDirty.value) return true
   try {
     await ElMessageBox.confirm(
@@ -2753,7 +2816,9 @@ async function reset() {
         <div class="document-icon"><el-icon><Document /></el-icon></div>
         <h2>{{ selectedFile?.name }}</h2>
         <p>正在本地解析{{ sourceFormatLabel }}文件，不会上传任何内容。</p>
-        <el-progress :percentage="progress" :stroke-width="9" />
+        <el-progress :percentage="progress" :stroke-width="9" :indeterminate="progress < 100 && !recognitionTask?.total" :show-text="progress === 100 || !!recognitionTask?.total" />
+        <p v-if="recognitionTaskId">{{ recognitionCancelRequested && recognitionTask?.cancellable !== false ? '正在停止，当前处理步骤结束后取消…' : recognitionTask?.phase || '等待读取文件…' }}<template v-if="recognitionTask?.total">（{{ recognitionTask.completed }} / {{ recognitionTask.total }}）</template></p>
+        <el-button v-if="recognitionTaskId" :disabled="recognitionCancelRequested || recognitionTask?.cancellable === false" @click="cancelRecognition">取消识别</el-button>
         <div v-if="recognitionError" class="warning-banner recognition-error">
           <strong>{{ recognitionError }}</strong>
           <span>{{ recognitionErrorAdvice }}</span>
@@ -2874,6 +2939,7 @@ async function reset() {
         </div>
 
         <div v-if="activeItem" class="review-editor surface">
+          <FormulaCompatibilityNotice :fields="questionFormulaFields(activeItem, `第 ${activeItem.ordinal} 题 `)" />
           <div v-if="activeItem.diagnostic" :class="activeItem.status === 'error' ? 'warning-banner' : 'info-banner'">
             {{ activeItem.diagnostic }}
           </div>

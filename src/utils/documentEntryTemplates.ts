@@ -48,7 +48,7 @@ export function normalizeDocumentEntryTemplateConfig(
   }
 }
 
-export function optionMarker(style: DocumentEntryOptionStyle, letter: string) {
+function optionMarker(style: DocumentEntryOptionStyle, letter: string) {
   if (style === 'letter_comma') return `${letter}、`
   if (style === 'letter_parentheses') return `（${letter}）`
   if (style === 'letter_brackets') return `【${letter}】`

@@ -26,7 +26,7 @@ use super::models::{
 
 const WORD_IMPORT_DRAFT_KEY: &str = "word_import:active";
 const WORD_IMPORT_DRAFT_KIND: &str = "word_import_preview";
-const WORD_IMPORT_PARSER_VERSION: &str = "w1-ooxml-images-formulas-tables-10";
+const WORD_IMPORT_PARSER_VERSION: &str = "w1-ooxml-images-formulas-tables-11";
 const MAX_RESOURCE_REFS_PER_QUESTION: usize = 512;
 const MAX_WPS_CLIPBOARD_IMAGES: usize = 512;
 const MAX_WPS_CLIPBOARD_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
@@ -137,60 +137,23 @@ pub(crate) async fn begin_word_import(
         active_item_id: None,
         items: Vec::new(),
     };
-    let payload_json = serde_json::to_string(&payload).map_err(CommandError::database)?;
     let diagnostics_json =
         serde_json::to_string(&analysis.diagnostics).map_err(CommandError::database)?;
     let mut transaction = pool.begin().await.map_err(CommandError::database)?;
 
-    // A second check inside the write transaction prevents two concurrent
-    // import starts from replacing one another even if both passed preflight.
-    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drafts WHERE draft_key = ?")
-        .bind(WORD_IMPORT_DRAFT_KEY)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(CommandError::database)?;
-    if existing != 0 {
-        return Err(CommandError::new(
-            "WORD_IMPORT_DRAFT_EXISTS",
-            "已有一份未完成的 Word 导入草稿，请先恢复或放弃旧草稿。",
-        ));
-    }
-
-    sqlx::query(
-        "INSERT INTO drafts (id, draft_key, draft_kind, target_question_id, \
-             base_content_version, payload_schema_version, payload_json, source_title, \
-             autosaved_at_ms, created_at_ms, updated_at_ms) \
-         VALUES (?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?)",
+    insert_import_session(
+        &mut transaction,
+        NewImportSession {
+            draft_id: &draft_id,
+            session_id: &session_id,
+            payload: &payload,
+            source_sha256: &source_sha256,
+            diagnostics_json: &diagnostics_json,
+            now,
+            conflict_message: "已有一份未完成的 Word 导入草稿，请先恢复或放弃旧草稿。",
+        },
     )
-    .bind(&draft_id)
-    .bind(WORD_IMPORT_DRAFT_KEY)
-    .bind(WORD_IMPORT_DRAFT_KIND)
-    .bind(&payload_json)
-    .bind(&source_filename)
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await
-    .map_err(CommandError::database)?;
-
-    sqlx::query(
-        "INSERT INTO word_import_sessions (id, draft_id, source_filename, source_sha256, \
-             source_byte_size, parser_version, status, diagnostics_json, created_at_ms, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, 'reviewing', ?, ?, ?)",
-    )
-    .bind(&session_id)
-    .bind(&draft_id)
-    .bind(&source_filename)
-    .bind(source_sha256)
-    .bind(i64::try_from(source_size).unwrap_or(i64::MAX))
-    .bind(WORD_IMPORT_PARSER_VERSION)
-    .bind(diagnostics_json)
-    .bind(now)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await
-    .map_err(CommandError::database)?;
+    .await?;
 
     for occurrence in &prepared {
         sqlx::query(
@@ -238,6 +201,9 @@ pub(crate) async fn begin_word_import(
         .into_iter()
         .map(|table| DocxTableOccurrenceApi {
             table_index: u32::try_from(table.index).unwrap_or(u32::MAX),
+            width_px: table.width_px,
+            column_widths_px: table.column_widths_px,
+            row_min_heights_px: table.row_min_heights_px,
             rows: table
                 .rows
                 .into_iter()
@@ -309,55 +275,23 @@ pub(crate) async fn begin_excel_import(
         active_item_id: None,
         items: Vec::new(),
     };
-    let payload_json = serde_json::to_string(&payload).map_err(CommandError::database)?;
     let diagnostics_json =
         serde_json::to_string(&analysis.warnings).map_err(CommandError::database)?;
     let mut transaction = pool.begin().await.map_err(CommandError::database)?;
-    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drafts WHERE draft_key = ?")
-        .bind(WORD_IMPORT_DRAFT_KEY)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(CommandError::database)?;
-    if existing != 0 {
-        return Err(CommandError::new(
-            "WORD_IMPORT_DRAFT_EXISTS",
-            "已有一份未完成的批量导入草稿，请先恢复或放弃旧草稿。",
-        ));
-    }
-    sqlx::query(
-        "INSERT INTO drafts (id, draft_key, draft_kind, target_question_id, \
-             base_content_version, payload_schema_version, payload_json, source_title, \
-             autosaved_at_ms, created_at_ms, updated_at_ms) \
-         VALUES (?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?)",
+    insert_import_session(
+        &mut transaction,
+        NewImportSession {
+            draft_id: &draft_id,
+            session_id: &session_id,
+            payload: &payload,
+            source_sha256: &source_sha256,
+            diagnostics_json: &diagnostics_json,
+            now,
+            conflict_message: "已有一份未完成的批量导入草稿，请先恢复或放弃旧草稿。",
+        },
     )
-    .bind(&draft_id)
-    .bind(WORD_IMPORT_DRAFT_KEY)
-    .bind(WORD_IMPORT_DRAFT_KIND)
-    .bind(&payload_json)
-    .bind(&source_filename)
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await
-    .map_err(CommandError::database)?;
-    sqlx::query(
-        "INSERT INTO word_import_sessions (id, draft_id, source_filename, source_sha256, \
-             source_byte_size, parser_version, status, diagnostics_json, created_at_ms, updated_at_ms) \
-         VALUES (?, ?, ?, ?, ?, ?, 'reviewing', ?, ?, ?)",
-    )
-    .bind(&session_id)
-    .bind(&draft_id)
-    .bind(&source_filename)
-    .bind(source_sha256)
-    .bind(i64::try_from(source_size).unwrap_or(i64::MAX))
-    .bind(super::excel_import::EXCEL_IMPORT_PARSER_VERSION)
-    .bind(diagnostics_json)
-    .bind(now)
-    .bind(now)
-    .execute(&mut *transaction)
-    .await
-    .map_err(CommandError::database)?;
+    .await?;
+
     transaction.commit().await.map_err(CommandError::database)?;
 
     Ok(BeginExcelImportResultApi {
@@ -370,6 +304,73 @@ pub(crate) async fn begin_excel_import(
             updated_at: now,
         },
     })
+}
+
+struct NewImportSession<'a> {
+    draft_id: &'a str,
+    session_id: &'a str,
+    payload: &'a WordImportDraftPayloadApi,
+    source_sha256: &'a [u8],
+    diagnostics_json: &'a str,
+    now: i64,
+    conflict_message: &'a str,
+}
+
+// Keep the second conflict check and both inserts in the caller's write transaction.
+async fn insert_import_session(
+    connection: &mut SqliteConnection,
+    session: NewImportSession<'_>,
+) -> CommandResult<()> {
+    let payload_json = serde_json::to_string(session.payload).map_err(CommandError::database)?;
+    let existing: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM drafts WHERE draft_key = ?")
+        .bind(WORD_IMPORT_DRAFT_KEY)
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(CommandError::database)?;
+    if existing != 0 {
+        return Err(CommandError::new(
+            "WORD_IMPORT_DRAFT_EXISTS",
+            session.conflict_message,
+        ));
+    }
+
+    sqlx::query(
+        "INSERT INTO drafts (id, draft_key, draft_kind, target_question_id, \
+             base_content_version, payload_schema_version, payload_json, source_title, \
+             autosaved_at_ms, created_at_ms, updated_at_ms) \
+         VALUES (?, ?, ?, NULL, NULL, 1, ?, ?, ?, ?, ?)",
+    )
+    .bind(session.draft_id)
+    .bind(WORD_IMPORT_DRAFT_KEY)
+    .bind(WORD_IMPORT_DRAFT_KIND)
+    .bind(&payload_json)
+    .bind(&session.payload.source_file_name)
+    .bind(session.now)
+    .bind(session.now)
+    .bind(session.now)
+    .execute(&mut *connection)
+    .await
+    .map_err(CommandError::database)?;
+
+    sqlx::query(
+        "INSERT INTO word_import_sessions (id, draft_id, source_filename, source_sha256, \
+             source_byte_size, parser_version, status, diagnostics_json, created_at_ms, updated_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, 'reviewing', ?, ?, ?)",
+    )
+    .bind(session.session_id)
+    .bind(session.draft_id)
+    .bind(&session.payload.source_file_name)
+    .bind(session.source_sha256)
+    .bind(i64::try_from(session.payload.source_file_size).unwrap_or(i64::MAX))
+    .bind(&session.payload.parser_version)
+    .bind(session.diagnostics_json)
+    .bind(session.now)
+    .bind(session.now)
+    .execute(&mut *connection)
+    .await
+    .map_err(CommandError::database)?;
+
+    Ok(())
 }
 
 async fn prepare_resources(
@@ -1377,6 +1378,151 @@ fn now_millis() -> i64 {
 mod tests {
     use super::*;
     use crate::db::Database;
+    use sqlx::Connection;
+
+    fn import_payload(filename: &str, parser: &str, session_id: &str) -> WordImportDraftPayloadApi {
+        WordImportDraftPayloadApi {
+            schema_version: 1,
+            source_file_name: filename.to_owned(),
+            source_file_size: 1234,
+            parser_version: parser.to_owned(),
+            import_session_id: Some(session_id.to_owned()),
+            source_item_count: None,
+            omitted_item_count: 0,
+            active_item_id: None,
+            items: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn import_sessions_persist_source_metadata_and_reject_conflicting_drafts() {
+        for (filename, parser, diagnostics) in [
+            (
+                "questions.docx",
+                WORD_IMPORT_PARSER_VERSION,
+                r#"[{"code":"word-warning"}]"#,
+            ),
+            (
+                "questions.xlsx",
+                super::super::excel_import::EXCEL_IMPORT_PARSER_VERSION,
+                r#"["excel-warning"]"#,
+            ),
+        ] {
+            let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+            sqlx::migrate!("./migrations")
+                .run(&mut connection)
+                .await
+                .unwrap();
+            let draft_id = Uuid::now_v7().to_string();
+            let session_id = Uuid::now_v7().to_string();
+            let payload = import_payload(filename, parser, &session_id);
+            let hash = [7_u8; 32];
+            let mut transaction = connection.begin().await.unwrap();
+            insert_import_session(
+                &mut transaction,
+                NewImportSession {
+                    draft_id: &draft_id,
+                    session_id: &session_id,
+                    payload: &payload,
+                    source_sha256: &hash,
+                    diagnostics_json: diagnostics,
+                    now: 123,
+                    conflict_message: "existing import",
+                },
+            )
+            .await
+            .unwrap();
+            transaction.commit().await.unwrap();
+
+            let stored: (String, i64, String, String, Vec<u8>, String) = sqlx::query_as(
+                "SELECT s.source_filename, s.source_byte_size, s.parser_version, \
+                 s.diagnostics_json, s.source_sha256, d.payload_json \
+                 FROM word_import_sessions s JOIN drafts d ON s.draft_id = d.id WHERE s.id = ?",
+            )
+            .bind(&session_id)
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            assert_eq!(
+                (&stored.0[..], stored.1, &stored.2[..], &stored.3[..]),
+                (filename, 1234, parser, diagnostics)
+            );
+            assert_eq!(stored.4, hash);
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&stored.5).unwrap(),
+                serde_json::to_value(&payload).unwrap()
+            );
+
+            let mut transaction = connection.begin().await.unwrap();
+            let error = insert_import_session(
+                &mut transaction,
+                NewImportSession {
+                    draft_id: &Uuid::now_v7().to_string(),
+                    session_id: &Uuid::now_v7().to_string(),
+                    payload: &payload,
+                    source_sha256: &hash,
+                    diagnostics_json: diagnostics,
+                    now: 456,
+                    conflict_message: "existing import",
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "WORD_IMPORT_DRAFT_EXISTS");
+            transaction.rollback().await.unwrap();
+            let counts: (i64, i64) = sqlx::query_as(
+                "SELECT (SELECT COUNT(*) FROM drafts), (SELECT COUNT(*) FROM word_import_sessions)",
+            )
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+            assert_eq!(counts, (1, 1));
+            connection.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_import_session_rolls_back_its_draft() {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations")
+            .run(&mut connection)
+            .await
+            .unwrap();
+        let draft_id = Uuid::now_v7().to_string();
+        let session_id = Uuid::now_v7().to_string();
+        let payload = import_payload("questions.docx", WORD_IMPORT_PARSER_VERSION, &session_id);
+        let mut transaction = connection.begin().await.unwrap();
+        let result = insert_import_session(
+            &mut transaction,
+            NewImportSession {
+                draft_id: &draft_id,
+                session_id: &session_id,
+                payload: &payload,
+                source_sha256: &[1],
+                diagnostics_json: "[]",
+                now: 123,
+                conflict_message: "existing import",
+            },
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "an invalid hash must fail the session insert"
+        );
+        transaction.rollback().await.unwrap();
+        let counts: (i64, i64) = sqlx::query_as(
+            "SELECT (SELECT COUNT(*) FROM drafts), (SELECT COUNT(*) FROM word_import_sessions)",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(
+            counts,
+            (0, 0),
+            "the earlier draft insert must roll back too"
+        );
+        connection.close().await.unwrap();
+    }
 
     fn rich(html: &str) -> RichContentApi {
         RichContentApi {

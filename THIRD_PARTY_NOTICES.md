@@ -30,7 +30,7 @@
 
 ## Rich DOCX export
 
-- `tex2word-math` 1.0.6 converts the application's editable LaTeX formula nodes to native Office Math Markup Language (OMML). It is distributed under the MIT License.
+- `tex2word-math` 1.0.6 converts the application's editable LaTeX formula nodes to native Office Math Markup Language (OMML). It is distributed under the MIT License, Copyright (c) 2026 Yifan Yang. TKup's local patch adds checked conversion and no-bar fractions; source and license are retained in `src-tauri/vendor/tex2word-math/`.
 - `scraper` 0.27.0 and `ego-tree` 0.11.0 parse the application's bounded rich-content HTML into the DOCX export model. Both are distributed under the ISC License.
 - These components run locally and do not require Microsoft Office, WPS Office, LibreOffice, a cloud service, or a per-document royalty.
 

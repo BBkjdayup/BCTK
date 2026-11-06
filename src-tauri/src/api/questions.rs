@@ -1,3 +1,5 @@
+use super::rich_validation::RichContentPolicy;
+use super::rich_validation::rich_content_bytes;
 use sha2::{Digest, Sha256};
 use sqlx::{FromRow, QueryBuilder, Sqlite, SqliteConnection, SqlitePool};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -15,7 +17,7 @@ use super::models::{
     QuestionDuplicateBatchResultApi, QuestionDuplicateCandidateApi, QuestionDuplicateCheckApi,
     QuestionDuplicateGroupApi, QuestionDuplicateMemberApi, QuestionDuplicateScanRequestApi,
     QuestionDuplicateScanResultApi, QuestionFiltersApi, QuestionOptionApi, QuestionResourceRefApi,
-    QuestionStemSummaryApi, RichContentApi, TagApi,
+    QuestionStemSummaryApi, QuestionSummaryApi, RichContentApi, TagApi,
 };
 use super::{
     content_identity, question_types,
@@ -25,13 +27,9 @@ use super::{
     resources,
 };
 
-const MAX_RICH_HTML_BYTES: usize = 2 * 1024 * 1024;
-const MAX_RICH_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RICH_PLAIN_BYTES: usize = 512 * 1024;
-const MAX_SOURCE_OOXML_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOTAL_CONTENT_BYTES: usize = 12 * 1024 * 1024;
 const MAX_OPTIONS: usize = 26;
-const MAX_TAGS: usize = 100;
+pub(super) const MAX_TAGS: usize = 100;
 const MAX_BATCH_EDIT_QUESTIONS: usize = 500;
 const MAX_IMPORTED_QUESTION_OVERWRITES: usize = 100;
 const MAX_DUPLICATE_CANDIDATES: usize = 256;
@@ -259,6 +257,16 @@ async fn hydrate_questions(
         .await
         .map_err(CommandError::database)?;
 
+    assemble_questions(rows, option_rows, tag_rows, resource_rows, &HashMap::new())
+}
+
+fn assemble_questions(
+    rows: Vec<QuestionRow>,
+    option_rows: Vec<ExportOptionRow>,
+    tag_rows: Vec<ExportTagRow>,
+    resource_rows: Vec<ExportResourceRefRow>,
+    question_type_names: &HashMap<String, String>,
+) -> CommandResult<Vec<QuestionApi>> {
     let mut options_by_question = HashMap::<String, Vec<QuestionOptionApi>>::new();
     for option in option_rows {
         options_by_question
@@ -299,10 +307,11 @@ async fn hydrate_questions(
     let mut items = Vec::with_capacity(rows.len());
     for row in rows {
         let id = row.id.clone();
+        let question_type = row.question_type.clone();
         items.push(QuestionApi {
             id: row.id,
             question_type: row.question_type,
-            question_type_name: None,
+            question_type_name: question_type_names.get(&question_type).cloned(),
             stem: parse_rich(&row.stem_json)?,
             options: options_by_question.remove(&id).unwrap_or_default(),
             answer: parse_rich(&row.answer_json)?,
@@ -390,6 +399,79 @@ pub async fn list_questions(
     pool: &SqlitePool,
     filters: &QuestionFiltersApi,
 ) -> CommandResult<PageResultApi<QuestionApi>> {
+    let page = question_page(pool, filters, false).await?;
+    Ok(PageResultApi {
+        items: hydrate_questions(pool, page.items).await?,
+        total: page.total,
+        page: page.page,
+        page_size: page.page_size,
+    })
+}
+
+pub async fn list_question_summaries(
+    pool: &SqlitePool,
+    filters: &QuestionFiltersApi,
+) -> CommandResult<PageResultApi<QuestionSummaryApi>> {
+    let page = question_page(pool, filters, true).await?;
+    let mut tags = HashMap::<String, Vec<TagApi>>::new();
+    if !page.items.is_empty() {
+        let mut query = QueryBuilder::<Sqlite>::new(
+            "SELECT qt.question_id, t.id, t.name, t.created_at_ms, t.updated_at_ms, (SELECT COUNT(*) FROM question_tags counts JOIN questions q ON q.id=counts.question_id WHERE counts.tag_id=t.id AND q.deleted_at_ms IS NULL) AS question_count FROM question_tags qt JOIN tags t ON t.id=qt.tag_id WHERE qt.question_id IN (",
+        );
+        let mut ids = query.separated(",");
+        for row in &page.items {
+            ids.push_bind(&row.id);
+        }
+        ids.push_unseparated(") ORDER BY t.name,t.id");
+        for row in query
+            .build_query_as::<ExportTagRow>()
+            .fetch_all(pool)
+            .await
+            .map_err(CommandError::database)?
+        {
+            tags.entry(row.question_id).or_default().push(TagApi {
+                id: row.id,
+                name: row.name,
+                question_count: row.question_count,
+                created_at: row.created_at_ms,
+                updated_at: row.updated_at_ms,
+            });
+        }
+    }
+    let items = page
+        .items
+        .into_iter()
+        .map(|row| {
+            Ok(QuestionSummaryApi {
+                tags: tags.remove(&row.id).unwrap_or_default(),
+                id: row.id,
+                question_type: row.question_type,
+                stem: parse_rich(&row.stem_json)?,
+                subject_id: row.subject_id,
+                chapter_id: row.chapter_id,
+                subject_name: row.subject_name,
+                chapter_name: row.chapter_name,
+                last_used_at: row.last_used_at_ms,
+                deleted_at: row.deleted_at_ms,
+                created_at: row.created_at_ms,
+                updated_at: row.updated_at_ms,
+                content_version: row.content_version,
+            })
+        })
+        .collect::<CommandResult<Vec<_>>>()?;
+    Ok(PageResultApi {
+        items,
+        total: page.total,
+        page: page.page,
+        page_size: page.page_size,
+    })
+}
+
+async fn question_page(
+    pool: &SqlitePool,
+    filters: &QuestionFiltersApi,
+    summary: bool,
+) -> CommandResult<PageResultApi<QuestionRow>> {
     if filters.tag_ids.len() > MAX_TAGS {
         return Err(CommandError::validation(format!(
             "一次最多筛选 {MAX_TAGS} 个标签。"
@@ -417,16 +499,21 @@ pub async fn list_questions(
         .await
         .map_err(CommandError::database)?;
 
-    let mut rows_builder = QueryBuilder::<Sqlite>::new(
+    let content = if summary {
+        "json_object('schemaVersion',1,'html',COALESCE(json_extract(q.stem_json,'$.html'),''),'plainText',q.stem_plain) AS stem_json, '{}' AS answer_json, '{}' AS explanation_json"
+    } else {
+        "q.stem_json, q.answer_json, q.explanation_json"
+    };
+    let mut rows_builder = QueryBuilder::<Sqlite>::new(format!(
         "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
                 s.name AS subject_name, c.name AS chapter_name, \
-                q.stem_json, q.answer_json, q.explanation_json, q.content_version, \
+                {content}, q.content_version, \
                 q.last_used_at_ms, q.deleted_at_ms, q.created_at_ms, q.updated_at_ms \
          FROM questions q \
          JOIN subjects s ON s.id = q.subject_id \
          JOIN chapters c ON c.id = q.chapter_id \
          WHERE 1 = 1",
-    );
+    ));
     push_filters(&mut rows_builder, filters, usage_constraint);
     rows_builder
         .push(" ORDER BY ")
@@ -446,10 +533,8 @@ pub async fn list_questions(
         .await
         .map_err(CommandError::database)?;
 
-    let items = hydrate_questions(pool, rows).await?;
-
     Ok(PageResultApi {
-        items,
+        items: rows,
         total,
         page,
         page_size,
@@ -493,7 +578,7 @@ pub(crate) async fn load_questions_by_ids(
         .map(|id| {
             by_id
                 .remove(id)
-                .ok_or_else(|| CommandError::database("随机抽中的题目无法重新读取。"))
+                .ok_or_else(|| CommandError::database("所选题目无法重新读取，请刷新列表后重试。"))
         })
         .collect()
 }
@@ -562,69 +647,13 @@ pub(crate) async fn list_active_questions_for_export(
     .await
     .map_err(CommandError::database)?;
 
-    let mut options_by_question = HashMap::<String, Vec<QuestionOptionApi>>::new();
-    for option in option_rows {
-        options_by_question
-            .entry(option.question_id)
-            .or_default()
-            .push(QuestionOptionApi {
-                id: option.id,
-                position: u32::try_from(option.position).unwrap_or_default(),
-                content: parse_rich(&option.content_json)?,
-            });
-    }
-    let mut tags_by_question = HashMap::<String, Vec<TagApi>>::new();
-    for tag in tag_rows {
-        tags_by_question
-            .entry(tag.question_id)
-            .or_default()
-            .push(TagApi {
-                id: tag.id,
-                name: tag.name,
-                question_count: tag.question_count,
-                created_at: tag.created_at_ms,
-                updated_at: tag.updated_at_ms,
-            });
-    }
-    let mut resources_by_question = HashMap::<String, Vec<QuestionResourceRefApi>>::new();
-    for resource in resource_rows {
-        resources_by_question
-            .entry(resource.question_id)
-            .or_default()
-            .push(QuestionResourceRefApi {
-                node_id: resource.node_id,
-                resource_id: resource.resource_id,
-                content_slot: resource.content_slot,
-                option_id: resource.option_id,
-            });
-    }
-
-    let mut items = Vec::with_capacity(rows.len());
-    for row in rows {
-        let id = row.id.clone();
-        let question_type = row.question_type.clone();
-        items.push(QuestionApi {
-            id: row.id,
-            question_type: row.question_type,
-            question_type_name: question_type_names.get(&question_type).cloned(),
-            stem: parse_rich(&row.stem_json)?,
-            options: options_by_question.remove(&id).unwrap_or_default(),
-            answer: parse_rich(&row.answer_json)?,
-            explanation: parse_rich(&row.explanation_json)?,
-            subject_id: row.subject_id,
-            chapter_id: row.chapter_id,
-            subject_name: row.subject_name,
-            chapter_name: row.chapter_name,
-            tags: tags_by_question.remove(&id).unwrap_or_default(),
-            resource_refs: resources_by_question.remove(&id).unwrap_or_default(),
-            last_used_at: row.last_used_at_ms,
-            deleted_at: row.deleted_at_ms,
-            created_at: row.created_at_ms,
-            updated_at: row.updated_at_ms,
-            content_version: row.content_version,
-        });
-    }
-    Ok(items)
+    assemble_questions(
+        rows,
+        option_rows,
+        tag_rows,
+        resource_rows,
+        &question_type_names,
+    )
 }
 
 pub async fn get_question_stem_summaries(
@@ -757,161 +786,11 @@ fn validate_rich_content(
     content: &RichContentApi,
     allow_empty: bool,
 ) -> CommandResult<()> {
-    validate_rich_document(label, content)?;
-    if content
-        .plain_text
-        .chars()
-        .any(|character| matches!(character, '\u{1e}' | '\u{1f}'))
-    {
-        return Err(CommandError::validation(format!(
-            "{label}包含软件保留的控制字符，请删除后重试。"
-        )));
-    }
-    if content.html.len() > MAX_RICH_HTML_BYTES {
-        return Err(CommandError::validation(format!(
-            "{label}的富文本超过 {} MB 的安全上限。",
-            MAX_RICH_HTML_BYTES / 1024 / 1024
-        )));
-    }
-    if content.plain_text.len() > MAX_RICH_PLAIN_BYTES {
-        return Err(CommandError::validation(format!(
-            "{label}的可搜索文字过长，请拆分内容。"
-        )));
-    }
-    if content
-        .source_ooxml
-        .as_ref()
-        .is_some_and(|xml| xml.len() > MAX_SOURCE_OOXML_BYTES)
-    {
-        return Err(CommandError::validation(format!(
-            "{label}保留的 Word 原始内容超过安全上限。"
-        )));
-    }
-
-    let normalized_html = content
-        .html
-        .to_ascii_lowercase()
-        .split_ascii_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let forbidden = [
-        "<script",
-        "<iframe",
-        "<object",
-        "<embed",
-        "<link",
-        "<meta",
-        "<base",
-        "javascript:",
-        "data:text/html",
-        "srcdoc=",
-    ];
-    if forbidden
-        .iter()
-        .any(|pattern| normalized_html.contains(pattern))
-        || contains_inline_event_handler(&normalized_html)
-    {
-        return Err(CommandError::new(
-            "UNSAFE_RICH_CONTENT",
-            format!("{label}中包含不安全的网页代码，已停止保存。"),
-        ));
-    }
-    if !allow_empty && !content_identity::has_content(content) {
-        return Err(CommandError::validation(format!("{label}不能为空。")));
-    }
-    Ok(())
-}
-
-fn contains_inline_event_handler(html: &str) -> bool {
-    let bytes = html.as_bytes();
-    let mut index = 0usize;
-    while index + 3 < bytes.len() {
-        if bytes[index] == b' ' && bytes[index + 1] == b'o' && bytes[index + 2] == b'n' {
-            let mut cursor = index + 3;
-            while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
-                cursor += 1;
-            }
-            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-                cursor += 1;
-            }
-            if cursor > index + 3 && bytes.get(cursor) == Some(&b'=') {
-                return true;
-            }
-        }
-        index += 1;
-    }
-    false
-}
-
-fn validate_rich_document(label: &str, content: &RichContentApi) -> CommandResult<()> {
-    match content.schema_version {
-        1 => {
-            if content.editor.is_some()
-                || content.editor_version.is_some()
-                || content.document.is_some()
-            {
-                return Err(CommandError::validation(format!(
-                    "{label}的旧内容版本不能携带编辑器 JSON。"
-                )));
-            }
-        }
-        2 => {
-            if content.editor.as_deref() != Some("tiptap") {
-                return Err(CommandError::validation(format!(
-                    "{label}的编辑器类型不受支持。"
-                )));
-            }
-            let version = content.editor_version.as_deref().unwrap_or_default().trim();
-            if version.is_empty() || version.chars().count() > 64 {
-                return Err(CommandError::validation(format!(
-                    "{label}的编辑器版本无效。"
-                )));
-            }
-            let document = content.document.as_ref().ok_or_else(|| {
-                CommandError::validation(format!("{label}缺少 Tiptap 文档 JSON。"))
-            })?;
-            if document.get("type").and_then(serde_json::Value::as_str) != Some("doc") {
-                return Err(CommandError::validation(format!(
-                    "{label}的 Tiptap 文档根节点无效。"
-                )));
-            }
-            if serde_json::to_vec(document)
-                .map_err(CommandError::database)?
-                .len()
-                > MAX_RICH_DOCUMENT_BYTES
-            {
-                return Err(CommandError::validation(format!(
-                    "{label}的 Tiptap 文档 JSON 超过安全上限。"
-                )));
-            }
-        }
-        _ => {
-            return Err(CommandError::validation(format!(
-                "{label}使用了软件暂不支持的内容版本。"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn rich_content_bytes(content: &RichContentApi) -> usize {
-    content
-        .html
-        .len()
-        .saturating_add(content.plain_text.len())
-        .saturating_add(
-            content
-                .source_ooxml
-                .as_ref()
-                .map_or(0, std::string::String::len),
-        )
-        .saturating_add(
-            content
-                .document
-                .as_ref()
-                .and_then(|document| serde_json::to_vec(document).ok())
-                .map_or(0, |document| document.len()),
-        )
+    super::rich_validation::validate_rich_content(
+        label,
+        content,
+        RichContentPolicy::Question { allow_empty },
+    )
 }
 
 #[cfg(test)]
@@ -1810,10 +1689,24 @@ async fn load_duplicate_scan_texts(
     Ok(rows.into_iter().map(|row| (row.id.clone(), row)).collect())
 }
 
+#[cfg(test)]
 pub async fn scan_question_duplicates(
     pool: &SqlitePool,
     request: &QuestionDuplicateScanRequestApi,
 ) -> CommandResult<QuestionDuplicateScanResultApi> {
+    scan_question_duplicates_with_cancel(pool, request, None).await
+}
+
+pub async fn scan_question_duplicates_with_cancel(
+    pool: &SqlitePool,
+    request: &QuestionDuplicateScanRequestApi,
+    scan_id: Option<&str>,
+) -> CommandResult<QuestionDuplicateScanResultApi> {
+    let scan_id = scan_id
+        .map(|id| canonical_uuid(id, "查重任务标识"))
+        .transpose()?;
+    let scan_id = scan_id.as_deref();
+    ensure_duplicate_scan_active(scan_id)?;
     let subject_id = canonical_uuid(&request.subject_id, "学科标识")?;
     let chapter_id = request
         .chapter_id
@@ -1887,6 +1780,7 @@ pub async fn scan_question_duplicates(
 
     let mut exact_by_fingerprint: HashMap<Vec<u8>, Vec<&DuplicateScanMetaRow>> = HashMap::new();
     for question in &questions {
+        ensure_duplicate_scan_active(scan_id)?;
         exact_by_fingerprint
             .entry(question.exact_fingerprint.clone())
             .or_default()
@@ -1953,6 +1847,7 @@ pub async fn scan_question_duplicates(
     let mut seen_pairs = HashSet::<(String, String)>::new();
     let mut suspected_groups = Vec::new();
     for scope_id in &scope_ids {
+        ensure_duplicate_scan_active(scan_id)?;
         let Some(&question_index) = question_indices.get(scope_id) else {
             continue;
         };
@@ -2002,6 +1897,7 @@ pub async fn scan_question_duplicates(
         };
         let input_text = similarity_text_from_scan(question_text);
         for candidate_index in candidate_indices {
+            ensure_duplicate_scan_active(scan_id)?;
             let candidate = &questions[candidate_index];
             let pair_ids = if question.id < candidate.id {
                 (question.id.clone(), candidate.id.clone())
@@ -2044,6 +1940,7 @@ pub async fn scan_question_duplicates(
             .then_with(|| left.id.cmp(&right.id))
     });
 
+    ensure_duplicate_scan_active(scan_id)?;
     Ok(QuestionDuplicateScanResultApi {
         scanned_question_count: u32::try_from(scope_ids.len()).unwrap_or(u32::MAX),
         compared_question_count: u32::try_from(questions.len()).unwrap_or(u32::MAX),
@@ -2300,6 +2197,7 @@ async fn save_question_in_connection(
                 "这道题已在其他窗口被修改，请重新打开后再保存。",
             ));
         }
+        super::question_history::capture(transaction, &question_id).await?;
         let affected = sqlx::query(
             "UPDATE questions SET question_type = ?, subject_id = ?, chapter_id = ?, content_schema_version = ?, \
              stem_json = ?, answer_json = ?, explanation_json = ?, stem_plain = ?, \
@@ -2352,7 +2250,6 @@ async fn save_question_in_connection(
         .bind(&stem_json).bind(&answer_json).bind(&explanation_json)
         .bind(&draft.stem.plain_text).bind(&options_plain).bind(&draft.answer.plain_text)
         .bind(&draft.explanation.plain_text).bind(&tags_plain).bind(&fingerprint)
-        .bind(content_identity::comparable(draft, &resource_hashes))
         .bind(content_identity::comparable(draft, &resource_hashes))
         .bind(now).bind(now)
         .execute(&mut *transaction).await.map_err(CommandError::database)?;
@@ -2418,6 +2315,7 @@ async fn save_question_in_connection(
     .bind(details_json).bind(app_version)
     .execute(&mut *transaction).await.map_err(CommandError::database)?;
 
+    super::question_history::capture(transaction, &question_id).await?;
     Ok(question_id)
 }
 
@@ -2433,51 +2331,6 @@ pub async fn save_question(
     get_question(pool, &question_id)
         .await?
         .ok_or_else(|| CommandError::database("保存后无法重新读取题目。"))
-}
-
-pub async fn save_questions(
-    pool: &SqlitePool,
-    drafts: &[QuestionDraftApi],
-    app_version: &str,
-) -> CommandResult<Vec<QuestionApi>> {
-    if drafts.is_empty() {
-        return Err(CommandError::validation("请至少录入一道题目。"));
-    }
-    if drafts.len() > 100 {
-        return Err(CommandError::validation(
-            "文档式录入一次最多保存 100 道题目。",
-        ));
-    }
-
-    let mut requested_question_ids = HashSet::new();
-    for draft in drafts {
-        if let Some(question_id) = draft.question_id.as_deref() {
-            let canonical = Uuid::parse_str(question_id)
-                .map_err(|_| CommandError::validation("批量保存中的题目 ID 无效。"))?
-                .to_string();
-            if canonical != question_id || !requested_question_ids.insert(canonical) {
-                return Err(CommandError::validation("批量保存不能多次覆盖同一道题目。"));
-            }
-        }
-    }
-
-    let mut transaction = pool.begin().await.map_err(CommandError::database)?;
-    let mut question_ids = Vec::with_capacity(drafts.len());
-    for draft in drafts {
-        question_ids
-            .push(save_question_in_connection(&mut transaction, draft, app_version, None).await?);
-    }
-    transaction.commit().await.map_err(CommandError::database)?;
-
-    let mut saved = Vec::with_capacity(question_ids.len());
-    for question_id in question_ids {
-        saved.push(
-            get_question(pool, &question_id)
-                .await?
-                .ok_or_else(|| CommandError::database("批量保存后无法重新读取题目。"))?,
-        );
-    }
-    Ok(saved)
 }
 
 pub async fn save_imported_questions(
@@ -2881,6 +2734,18 @@ pub async fn batch_edit_questions(
     }
 
     let now = now_millis();
+    let mut before = Vec::with_capacity(rows.len());
+    for row in &rows {
+        super::question_history::capture(&mut transaction, &row.id).await?;
+        before.push(
+            super::question_history::before(
+                &mut transaction,
+                &row.id,
+                request.usage_operation == "reset_never",
+            )
+            .await?,
+        );
+    }
     let mut versions = Vec::with_capacity(rows.len());
     for (row, target) in rows.iter().zip(&request.questions) {
         match request.tag_operation.mode.as_str() {
@@ -2979,6 +2844,7 @@ pub async fn batch_edit_questions(
                 "执行批量修改时检测到版本冲突，本次修改已全部撤销。",
             ));
         }
+        super::question_history::capture(&mut transaction, &row.id).await?;
         versions.push(QuestionBatchVersionApi {
             id: row.id.clone(),
             content_version: row.content_version.saturating_add(1),
@@ -3006,8 +2872,10 @@ pub async fn batch_edit_questions(
     .await
     .map_err(CommandError::database)?;
 
+    let undo_id = super::question_history::record_batch(&mut transaction, &before).await?;
     transaction.commit().await.map_err(CommandError::database)?;
     Ok(QuestionBatchEditResultApi {
+        undo_id: Some(undo_id),
         updated_count: u32::try_from(versions.len()).unwrap_or(u32::MAX),
         questions: versions,
     })
@@ -3188,6 +3056,380 @@ mod tests {
             resource_refs: Vec::new(),
             base_content_version: None,
         }
+    }
+
+    #[tokio::test]
+    async fn duplicate_merge_validates_every_version_and_undo_preserves_classification() {
+        use super::super::duplicate_merge::{self, MergeRequest};
+        use super::super::models::QuestionBatchTargetApi;
+        let root = test_root("duplicate-merge");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "保留学科", "章节").await;
+        let (other_subject, other_chapter) =
+            insert_test_classification(pool, "另一学科", "章节").await;
+        let old_tag = insert_test_tag(pool, "期中").await;
+        let other_tag = insert_test_tag(pool, "重点").await;
+        let mut a = draft("重复题", "答案");
+        a.subject_id = subject.clone();
+        a.chapter_id = chapter.clone();
+        a.tag_ids = vec![old_tag.clone()];
+        let first = save_question(pool, &a, "test").await.unwrap();
+        let mut b = a.clone();
+        b.subject_id = other_subject.clone();
+        b.chapter_id = other_chapter;
+        b.tag_ids = vec![other_tag.clone()];
+        let second = save_question(pool, &b, "test").await.unwrap();
+        let mut request = MergeRequest {
+            keeper_id: first.id.clone(),
+            duplicate_kind: "exact".into(),
+            members: vec![
+                QuestionBatchTargetApi {
+                    id: first.id.clone(),
+                    expected_content_version: 1,
+                },
+                QuestionBatchTargetApi {
+                    id: second.id.clone(),
+                    expected_content_version: 2,
+                },
+            ],
+        };
+        assert_eq!(
+            duplicate_merge::merge(pool, &request, "test")
+                .await
+                .unwrap_err()
+                .code,
+            "CONTENT_CONFLICT"
+        );
+        assert!(
+            get_question(pool, &second.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_none()
+        );
+        assert_eq!(
+            get_question(pool, &first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .tags
+                .len(),
+            1
+        );
+        request.members[1].expected_content_version = 1;
+        let receipt = duplicate_merge::merge(pool, &request, "test")
+            .await
+            .unwrap();
+        let kept = get_question(pool, &first.id).await.unwrap().unwrap();
+        assert_eq!(kept.tags.len(), 2);
+        assert_eq!(kept.subject_id, subject);
+        assert_eq!(kept.chapter_id, chapter);
+        assert!(
+            get_question(pool, &second.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_some()
+        );
+        assert_eq!(
+            duplicate_merge::latest(pool).await.unwrap().unwrap().id,
+            receipt.id
+        );
+        duplicate_merge::undo(pool, &receipt.id, "test")
+            .await
+            .unwrap();
+        let restored = get_question(pool, &first.id).await.unwrap().unwrap();
+        assert_eq!(restored.tags[0].id, old_tag);
+        assert_eq!(restored.tags.len(), 1);
+        assert_eq!(restored.content_version, 3);
+        let second_restored = get_question(pool, &second.id).await.unwrap().unwrap();
+        assert_eq!(second_restored.subject_id, other_subject);
+        assert!(second_restored.deleted_at.is_none());
+        assert_eq!(second_restored.tags[0].id, other_tag);
+        assert!(
+            duplicate_merge::undo(pool, &receipt.id, "test")
+                .await
+                .is_err()
+        );
+        request
+            .members
+            .iter_mut()
+            .for_each(|m| m.expected_content_version = 3);
+        request.keeper_id = Uuid::now_v7().to_string();
+        assert!(
+            duplicate_merge::merge(pool, &request, "test")
+                .await
+                .is_err()
+        );
+        request.keeper_id = first.id.clone();
+        let receipt = duplicate_merge::merge(pool, &request, "test")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE questions SET content_version=content_version+1 WHERE id=?")
+            .bind(&first.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            duplicate_merge::undo(pool, &receipt.id, "test")
+                .await
+                .unwrap_err()
+                .code,
+            "CONTENT_CONFLICT"
+        );
+        assert!(
+            get_question(pool, &second.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_some()
+        );
+        database.close().await;
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn duplicate_merge_rejects_distinct_content_and_excess_tags_without_partial_changes() {
+        use super::super::duplicate_merge::{self, MergeRequest};
+        use super::super::models::QuestionBatchTargetApi;
+        let root = test_root("duplicate-merge-limits");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "合并限制", "章节").await;
+        let mut a = draft("第一题", "答案");
+        a.subject_id = subject;
+        a.chapter_id = chapter;
+        for n in 0..100 {
+            a.tag_ids
+                .push(insert_test_tag(pool, &format!("标签{n}")).await);
+        }
+        let first = save_question(pool, &a, "test").await.unwrap();
+        let mut b = a.clone();
+        b.stem = rich("<p>第二题</p>", "第二题");
+        b.tag_ids = vec![insert_test_tag(pool, "第101个标签").await];
+        let second = save_question(pool, &b, "test").await.unwrap();
+        let mut request = MergeRequest {
+            keeper_id: first.id.clone(),
+            duplicate_kind: "exact".into(),
+            members: vec![
+                QuestionBatchTargetApi {
+                    id: first.id.clone(),
+                    expected_content_version: 1,
+                },
+                QuestionBatchTargetApi {
+                    id: second.id.clone(),
+                    expected_content_version: 1,
+                },
+            ],
+        };
+        assert_eq!(
+            duplicate_merge::merge(pool, &request, "test")
+                .await
+                .unwrap_err()
+                .code,
+            "CONTENT_CONFLICT"
+        );
+        request.duplicate_kind = "suspected".into();
+        assert!(
+            duplicate_merge::merge(pool, &request, "test")
+                .await
+                .unwrap_err()
+                .message
+                .contains("100")
+        );
+        assert_eq!(
+            get_question(pool, &first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .content_version,
+            1
+        );
+        assert!(
+            get_question(pool, &second.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .deleted_at
+                .is_none()
+        );
+        database.close().await;
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn question_summaries_keep_formula_html_and_details_load_in_requested_order() {
+        let root = test_root("question-summary-contract");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "摘要契约", "章节").await;
+        let mut a = draft("公式", "长答案");
+        a.subject_id = subject;
+        a.chapter_id = chapter;
+        a.stem = rich("<p><span data-latex='\\frac{1}{2}'></span></p>", "公式");
+        a.answer = rich(
+            &format!("<p>{}</p>", "长答案".repeat(5000)),
+            &"长答案".repeat(5000),
+        );
+        let first = save_question(pool, &a, "test").await.unwrap();
+        let second = save_question(pool, &a, "test").await.unwrap();
+        let filters:QuestionFiltersApi=serde_json::from_value(serde_json::json!({"keyword":"","tagIds":[],"tagMatchMode":"all","deleted":false,"page":1,"pageSize":100,"sortBy":"updatedAt","sortDirection":"desc"})).unwrap();
+        let summary = list_question_summaries(pool, &filters).await.unwrap();
+        let full = list_questions(pool, &filters).await.unwrap();
+        let small = serde_json::to_value(&summary).unwrap();
+        assert_eq!(summary.total, 2);
+        assert!(summary.items[0].stem.html.contains("\\frac{1}{2}"));
+        for field in ["answer", "explanation", "options", "resourceRefs"] {
+            assert!(small["items"][0].get(field).is_none());
+        }
+        assert!(small["items"][0]["stem"].get("document").is_none());
+        assert!(
+            serde_json::to_vec(&summary).unwrap().len() * 10
+                < serde_json::to_vec(&full).unwrap().len()
+        );
+        let loaded = load_questions_by_ids(pool, &[first.id.clone(), second.id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(loaded[0].id, first.id);
+        assert_eq!(loaded[1].id, second.id);
+        assert_eq!(loaded[0].answer.html, first.answer.html);
+        let scan_id = Uuid::now_v7().to_string();
+        cancel_question_duplicate_scan(&scan_id).unwrap();
+        let request = QuestionDuplicateScanRequestApi {
+            subject_id: first.subject_id.clone(),
+            chapter_id: None,
+        };
+        assert_eq!(
+            scan_question_duplicates_with_cancel(pool, &request, Some(&scan_id))
+                .await
+                .unwrap_err()
+                .code,
+            "DUPLICATE_SCAN_CANCELLED"
+        );
+        database.close().await;
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
+    #[ignore = "synthetic 1k/10k/50k local database benchmark"]
+    async fn benchmark_question_summary_payloads() {
+        use std::time::Instant;
+        let root = test_root("question-summary-benchmark");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "性能构造题库", "章节").await;
+        let mut value = draft("含公式的题干", "答案内容");
+        value.subject_id = subject;
+        value.chapter_id = chapter;
+        value.stem = rich("<p>求值 <span data-latex='x^2+1'></span></p>", "求值 x^2+1");
+        value.answer = rich(
+            &format!("<p>{}</p>", "答案内容".repeat(128)),
+            &"答案内容".repeat(128),
+        );
+        value.explanation = value.answer.clone();
+        let seed = save_question(pool, &value, "test").await.unwrap();
+        let filters: QuestionFiltersApi =
+            serde_json::from_value(serde_json::json!({"page":1,"pageSize":100})).unwrap();
+        let mut previous = 1;
+        for total in [1_000, 10_000, 50_000] {
+            sqlx::query("WITH RECURSIVE n(x) AS (SELECT ? UNION ALL SELECT x+1 FROM n WHERE x<?) INSERT INTO questions(id,question_type,subject_id,chapter_id,stem_json,answer_json,explanation_json,stem_plain,answer_plain,explanation_plain,fingerprint_version,exact_fingerprint,fingerprint_comparable,content_version,created_at_ms,updated_at_ms) SELECT printf('00000000-0000-4000-8000-%012d',n.x),q.question_type,q.subject_id,q.chapter_id,q.stem_json,q.answer_json,q.explanation_json,q.stem_plain,q.answer_plain,q.explanation_plain,q.fingerprint_version,q.exact_fingerprint,q.fingerprint_comparable,1,q.created_at_ms,q.updated_at_ms FROM n CROSS JOIN questions q WHERE q.id=?")
+                .bind(previous+1).bind(total).bind(&seed.id).execute(pool).await.unwrap();
+            previous = total;
+            let mut full_times = Vec::new();
+            let mut summary_times = Vec::new();
+            let mut preview_times = Vec::new();
+            let mut full_bytes = 0;
+            let mut summary_bytes = 0;
+            for _ in 0..5 {
+                let start = Instant::now();
+                let full = list_questions(pool, &filters).await.unwrap();
+                full_bytes = serde_json::to_vec(&full).unwrap().len();
+                full_times.push(start.elapsed().as_micros());
+                let start = Instant::now();
+                let summary = list_question_summaries(pool, &filters).await.unwrap();
+                summary_bytes = serde_json::to_vec(&summary).unwrap().len();
+                summary_times.push(start.elapsed().as_micros());
+                assert_eq!(summary.total, total as i64);
+                let start = Instant::now();
+                assert!(
+                    get_question(pool, &summary.items[0].id)
+                        .await
+                        .unwrap()
+                        .is_some()
+                );
+                preview_times.push(start.elapsed().as_micros());
+            }
+            full_times.sort();
+            summary_times.sort();
+            preview_times.sort();
+            println!(
+                "SUMMARY_BENCH rows={total} full_bytes={full_bytes} summary_bytes={summary_bytes} full_us={} summary_us={} preview_us={}",
+                full_times[2], summary_times[2], preview_times[2]
+            );
+            assert!(summary_bytes * 5 < full_bytes);
+        }
+        database.close().await;
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn all_creation_paths_store_real_timestamps_and_edits_keep_creation_time() {
+        let root = test_root("question-creation-timestamps");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "时间", "写入").await;
+        let mut value = draft("单题录入", "答案");
+        value.subject_id = subject;
+        value.chapter_id = chapter;
+        let before = now_millis();
+        let single = save_question(pool, &value, "test").await.unwrap();
+        value.id = Some(Uuid::now_v7().to_string());
+        value.stem = rich("<p>文件导入</p>", "文件导入");
+        let imported = save_imported_questions(pool, &[value.clone()], "test")
+            .await
+            .unwrap();
+        let after = now_millis();
+
+        for id in [&single.id, &imported[0]] {
+            let (created, updated, comparable, version): (i64, i64, bool, i64) = sqlx::query_as(
+                "SELECT created_at_ms, updated_at_ms, fingerprint_comparable, content_version FROM questions WHERE id = ?",
+            ).bind(id).fetch_one(pool).await.unwrap();
+            assert!(
+                (before..=after).contains(&created),
+                "{id}: created_at_ms={created}"
+            );
+            assert_eq!(created, updated);
+            assert!(comparable);
+            assert_eq!(version, 1);
+            let read = get_question(pool, id).await.unwrap().unwrap();
+            assert_eq!(read.created_at, created);
+        }
+
+        // No clock sleeps: set a known valid historical timestamp in this test
+        // database, then prove editing preserves it while refreshing updated_at.
+        let original_creation = before - 86_400_000;
+        sqlx::query("UPDATE questions SET created_at_ms = ?, updated_at_ms = ? WHERE id = ?")
+            .bind(original_creation)
+            .bind(original_creation)
+            .bind(&single.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        value.id = None;
+        value.question_id = Some(single.id);
+        value.base_content_version = Some(single.content_version);
+        let edit_before = now_millis();
+        let edited = save_question(pool, &value, "test").await.unwrap();
+        assert_eq!(edited.created_at, original_creation);
+        assert!((edit_before..=now_millis()).contains(&edited.updated_at));
+        assert_eq!(edited.content_version, 2);
+        database.close().await;
+        drop(database);
+        remove_test_root(&root);
     }
 
     #[test]
@@ -4472,5 +4714,131 @@ mod tests {
             normalized_fingerprint(&second),
             "Different figures must not share an exact-duplicate fingerprint"
         );
+    }
+    #[tokio::test]
+    async fn history_restores_as_new_version_and_preserves_old_image_references() {
+        use super::super::question_history as history;
+        let root = test_root("question-history");
+        let db = Database::open(&root, "test").await.unwrap();
+        let pool = db.pool();
+        let (subject, chapter) = insert_test_classification(pool, "历史", "图片").await;
+        let resource = Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO resources(id,sha256,resource_kind,mime_type,storage_rel_path,byte_size,created_at_ms) VALUES(?,zeroblob(32),'image','image/png','images/history.png',1,1)").bind(&resource).execute(pool).await.unwrap();
+        let mut original = draft("旧题干", "旧答案");
+        original.subject_id = subject;
+        original.chapter_id = chapter;
+        original.stem = rich(
+            &format!("<p>旧图<img data-resource-id=\"{resource}\"></p>"),
+            "旧图",
+        );
+        let first = save_question(pool, &original, "test").await.unwrap();
+        let entry = history::list(pool, &first.id).await.unwrap()[0]["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let mut edit = original.clone();
+        edit.question_id = Some(first.id.clone());
+        edit.base_content_version = Some(1);
+        edit.stem = rich("<p>新题干</p>", "新题干");
+        edit.answer = rich("<p>新答案</p>", "新答案");
+        let second = save_question(pool, &edit, "test").await.unwrap();
+        assert_eq!(second.content_version, 2);
+        let refs:i64=sqlx::query_scalar("SELECT COUNT(*) FROM resource_all_refs WHERE resource_id=? AND owner_kind='question_history'").bind(&resource).fetch_one(pool).await.unwrap();
+        assert!(refs > 0);
+        assert_eq!(
+            history::restore(pool, &entry, 1, "test")
+                .await
+                .unwrap_err()
+                .code,
+            "CONTENT_CONFLICT"
+        );
+        let restored = history::restore(pool, &entry, 2, "test").await.unwrap();
+        assert_eq!(restored.content_version, 3);
+        assert_eq!(restored.answer.plain_text, "旧答案");
+        assert!(restored.stem.html.contains(&resource));
+        assert_eq!(history::list(pool, &first.id).await.unwrap().len(), 3);
+        db.close().await;
+        drop(db);
+        remove_test_root(&root);
+    }
+    #[tokio::test]
+    async fn batch_undo_restores_every_item_and_refuses_later_usage_atomically() {
+        use super::super::question_history as history;
+        let root = test_root("batch-undo");
+        let db = Database::open(&root, "test").await.unwrap();
+        let pool = db.pool();
+        let (subject, chapter) = insert_test_classification(pool, "撤销", "章节").await;
+        let tag = insert_test_tag(pool, "原标签").await;
+        let mut value = draft("题干", "答案");
+        value.subject_id = subject;
+        value.chapter_id = chapter;
+        value.tag_ids = vec![tag.clone()];
+        let first = save_question(pool, &value, "test").await.unwrap();
+        let second = save_question(pool, &value, "test").await.unwrap();
+        let request:QuestionBatchEditRequestApi=serde_json::from_value(serde_json::json!({"questions":[{"id":first.id,"expectedContentVersion":1},{"id":second.id,"expectedContentVersion":1}],"classification":null,"usageOperation":"reset_never","tagOperation":{"mode":"replace","tagIds":[]}})).unwrap();
+        let receipt = batch_edit_questions(pool, &request, "test").await.unwrap();
+        let id = receipt.undo_id.unwrap();
+        sqlx::query("UPDATE questions SET last_used_at_ms=123 WHERE id=?")
+            .bind(&second.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            history::undo(pool, &id, "test").await.unwrap_err().code,
+            "CONTENT_CONFLICT"
+        );
+        assert!(
+            get_question(pool, &first.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .tags
+                .is_empty()
+        );
+        sqlx::query("UPDATE questions SET last_used_at_ms=NULL WHERE id=?")
+            .bind(&second.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        history::undo(pool, &id, "test").await.unwrap();
+        for q in [&first, &second] {
+            let result = get_question(pool, &q.id).await.unwrap().unwrap();
+            assert_eq!(result.tags[0].id, tag);
+            assert_eq!(result.content_version, 3)
+        }
+        assert!(history::undo(pool, &id, "test").await.is_err());
+        db.close().await;
+        drop(db);
+        remove_test_root(&root);
+    }
+    #[tokio::test]
+    async fn saved_filter_persists_conditions_without_copying_candidates() {
+        use super::super::question_history as history;
+        let root = test_root("saved-filter");
+        let db = Database::open(&root, "test").await.unwrap();
+        let pool = db.pool();
+        let (subject, chapter) = insert_test_classification(pool, "筛选", "章节").await;
+        let filters: QuestionFiltersApi = serde_json::from_value(
+            serde_json::json!({"keyword":"动态题","subjectId":subject,"page":9}),
+        )
+        .unwrap();
+        history::save_filter(pool, "常用", filters).await.unwrap();
+        let presets = history::filters(pool).await.unwrap();
+        assert_eq!(presets[0]["filters"]["page"], 1);
+        let filters: QuestionFiltersApi =
+            serde_json::from_value(presets[0]["filters"].clone()).unwrap();
+        assert_eq!(list_questions(pool, &filters).await.unwrap().total, 0);
+        let mut value = draft("动态题", "答案");
+        value.subject_id = subject;
+        value.chapter_id = chapter;
+        save_question(pool, &value, "test").await.unwrap();
+        assert_eq!(list_questions(pool, &filters).await.unwrap().total, 1);
+        history::delete_filter(pool, presets[0]["id"].as_str().unwrap())
+            .await
+            .unwrap();
+        assert!(history::filters(pool).await.unwrap().is_empty());
+        db.close().await;
+        drop(db);
+        remove_test_root(&root);
     }
 }

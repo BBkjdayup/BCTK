@@ -3,7 +3,7 @@ import type { RichContent } from '../types/domain'
 
 export const TIPTAP_CONTENT_EDITOR_VERSION = '3.31.0'
 
-export const EMPTY_TIPTAP_DOCUMENT: JSONContent = {
+const EMPTY_TIPTAP_DOCUMENT: JSONContent = {
   type: 'doc',
   content: [{ type: 'paragraph' }],
 }

@@ -1,5 +1,5 @@
 import type {
-  Question,
+  QuestionSummary,
   QuestionBatchEditRequest,
   QuestionBatchTagMode,
   QuestionBatchUsageOperation,
@@ -26,7 +26,7 @@ export function createQuestionBatchEditForm(): QuestionBatchEditForm {
 }
 
 export function questionBatchEditValidation(
-  questions: readonly Question[],
+  questions: readonly QuestionSummary[],
   form: QuestionBatchEditForm,
 ): string | null {
   if (!questions.length) return '请先选择至少一道要修改的题目。'
@@ -50,7 +50,7 @@ export function questionBatchEditValidation(
 }
 
 export function buildQuestionBatchEditRequest(
-  questions: readonly Question[],
+  questions: readonly QuestionSummary[],
   form: QuestionBatchEditForm,
 ): QuestionBatchEditRequest {
   const validation = questionBatchEditValidation(questions, form)

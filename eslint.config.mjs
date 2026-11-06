@@ -7,6 +7,7 @@ export default tseslint.config(
   {
     ignores: [
       'dist/**',
+      'dist-preview/**',
       'website/dist/**',
       'website/dist-admin/**',
       '.codex-tmp/**',

@@ -4826,8 +4826,6 @@ dependencies = [
 [[package]]
 name = "tex2word-math"
 version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03ee46945f5a099874cef47c387768e9d806586110a493918e91dc5690f6f237"
 
 [[package]]
 name = "thiserror"
@@ -6447,7 +6445,7 @@ dependencies = [
 
 [[package]]
 name = "zhitiku-desktop"
-version = "0.1.97"
+version = "0.1.105"
 dependencies = [
  "base64 0.22.1",
  "calamine",

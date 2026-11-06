@@ -11,6 +11,7 @@ use sqlx::{
 };
 
 use super::{DatabaseError, DatabasePaths, DatabaseResult};
+use crate::startup::StartupProgress;
 
 /// Big-endian ASCII "ZTKU". Existing non-empty files must already carry this
 /// identifier. In particular, an application_id of zero is never claimed for
@@ -64,16 +65,26 @@ impl Database {
     }
 
     pub async fn open(data_root: impl Into<PathBuf>, app_version: &str) -> DatabaseResult<Self> {
+        Self::open_with_progress(data_root, app_version, &StartupProgress::default()).await
+    }
+
+    pub async fn open_with_progress(
+        data_root: impl Into<PathBuf>,
+        app_version: &str,
+        progress: &StartupProgress,
+    ) -> DatabaseResult<Self> {
+        progress.stage("database", "正在打开本地题库");
         let paths = DatabasePaths::new(data_root);
         let existed_nonempty = file_is_nonempty(paths.database_file())?;
 
         paths.prepare()?;
 
         if existed_nonempty {
-            Self::upgrade_existing_database_safely(&paths, app_version).await?;
+            Self::upgrade_existing_database_safely(&paths, app_version, progress).await?;
         }
 
         let pool = connect_pool(paths.database_file(), true, 4).await?;
+        progress.stage("database_validation", "正在确认题库可正常使用");
         let bootstrap_result = if existed_nonempty {
             Self::bootstrap_existing(&pool).await
         } else {
@@ -119,7 +130,9 @@ impl Database {
     async fn upgrade_existing_database_safely(
         paths: &DatabasePaths,
         app_version: &str,
+        progress: &StartupProgress,
     ) -> DatabaseResult<()> {
+        progress.stage("source_validation", "正在检查原题库完整性");
         let mut source = connect_connection(paths.database_file(), false).await?;
 
         Self::verify_application_id_connection(&mut source, false).await?;
@@ -133,6 +146,7 @@ impl Database {
         // The exclusive locking mode keeps another SQLite connection from
         // changing the source while VACUUM INTO creates the snapshot.
         Self::hold_exclusive_lock(&mut source).await?;
+        progress.stage("source_locked_validation", "正在确认升级前的题库状态");
         Self::verify_integrity_connection(&mut source).await?;
 
         let files = MigrationFiles::new(paths)?;
@@ -142,12 +156,14 @@ impl Database {
             ));
         }
 
+        progress.stage("snapshot", "正在创建题库升级副本");
         if let Err(error) = Self::create_consistent_snapshot(&mut source, &files.candidate).await {
             let _ = remove_owned_work_file(&files.candidate);
             return Err(error);
         }
 
-        if let Err(error) = Self::migrate_and_verify_candidate(&files.candidate, app_version).await
+        if let Err(error) =
+            Self::migrate_and_verify_candidate(&files.candidate, app_version, progress).await
         {
             let _ = remove_owned_work_file(&files.candidate);
             return Err(error);
@@ -155,6 +171,7 @@ impl Database {
 
         // A retained old database must be self-contained. Flush any WAL pages
         // and return the source to DELETE mode before its main file is backed up.
+        progress.stage("switch_prepare", "正在准备保留原题库");
         if let Err(error) = Self::prepare_source_for_switch(&mut source).await {
             let _ = remove_owned_work_file(&files.candidate);
             return Err(error);
@@ -162,6 +179,7 @@ impl Database {
         source.close().await?;
         sync_file(&files.candidate)?;
 
+        progress.stage("switch", "正在启用已校验的题库");
         if let Err(error) =
             switch_database_files(paths.database_file(), &files.candidate, &files.backup)
         {
@@ -182,6 +200,7 @@ impl Database {
             };
         }
 
+        progress.stage("switched_validation", "正在完成题库升级校验");
         let switched_validation =
             sync_file(paths.database_file()).and_then(|()| sync_file(&files.backup));
         let switched_validation = match switched_validation {
@@ -310,19 +329,46 @@ impl Database {
     async fn migrate_and_verify_candidate(
         candidate: &Path,
         app_version: &str,
+        progress: &StartupProgress,
     ) -> DatabaseResult<()> {
         let mut connection = connect_connection(candidate, false).await?;
-        Self::verify_application_id_connection(&mut connection, false).await?;
-        Self::force_delete_journal(&mut connection).await?;
-        Self::prepare_legacy_builtin_question_type_conflicts(&mut connection).await?;
-        MIGRATOR.run_direct(&mut connection).await?;
-        crate::api::content_identity::rebuild_pending(&mut connection, None)
-            .await
-            .map_err(|error| DatabaseError::IntegrityCheck(error.message))?;
-        Self::ensure_database_identity_connection(&mut connection, app_version).await?;
-        Self::verify_integrity_connection(&mut connection).await?;
+        let result = Self::migrate_candidate_contents(&mut connection, app_version, progress).await;
+        // Close the worker's file handle even on migration errors before the
+        // caller removes its candidate (especially important on Windows).
+        let closed = connection.close().await;
+        result?;
+        closed?;
 
-        if !Self::schema_is_current_connection(&mut connection).await? {
+        let mut connection = connect_connection(candidate, false).await?;
+        let result = Self::prepare_source_for_switch(&mut connection).await;
+        let closed = connection.close().await;
+        result?;
+        closed?;
+        sync_file(candidate)
+    }
+
+    async fn migrate_candidate_contents(
+        connection: &mut SqliteConnection,
+        app_version: &str,
+        progress: &StartupProgress,
+    ) -> DatabaseResult<()> {
+        progress.stage("schema", "正在升级题库结构");
+        Self::verify_application_id_connection(connection, false).await?;
+        Self::force_delete_journal(connection).await?;
+        Self::prepare_legacy_builtin_question_type_conflicts(connection).await?;
+        MIGRATOR.run_direct(&mut *connection).await?;
+        crate::api::content_identity::rebuild_pending_with_progress(
+            connection,
+            None,
+            |done, total| progress.rebuilding(done, total),
+        )
+        .await
+        .map_err(|error| DatabaseError::IntegrityCheck(error.message))?;
+        progress.stage("candidate_validation", "正在校验升级后的题库");
+        Self::ensure_database_identity_connection(connection, app_version).await?;
+        Self::verify_integrity_connection(connection).await?;
+
+        if !Self::schema_is_current_connection(connection).await? {
             return Err(DatabaseError::IntegrityCheck(
                 "the migration candidate did not reach the expected schema".to_owned(),
             ));
@@ -334,13 +380,7 @@ impl Database {
         // validation are finalized before the checkpoint. SQLite otherwise
         // reports SQLITE_LOCKED when a checkpoint follows on the same Windows
         // connection.
-        Self::enable_wal_connection(&mut connection).await?;
-        connection.close().await?;
-
-        let mut connection = connect_connection(candidate, false).await?;
-        Self::prepare_source_for_switch(&mut connection).await?;
-        connection.close().await?;
-        sync_file(candidate)
+        Self::enable_wal_connection(connection).await
     }
 
     /// Migration 0015 was shipped before its custom-name conflict handling was
@@ -860,6 +900,106 @@ mod tests {
             "zhitiku-db-{name}-{}",
             uuid::Uuid::now_v7().simple()
         ))
+    }
+
+    #[tokio::test]
+    async fn startup_retries_large_legacy_upgrade_from_original_after_interrupted_candidate() {
+        let root = test_root("startup-interrupted-candidate");
+        let paths = DatabasePaths::new(&root);
+        paths.prepare().unwrap();
+        let mut source = connect_connection(paths.database_file(), true)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA application_id = 1515473749")
+            .execute(&mut source)
+            .await
+            .unwrap();
+        source.ensure_migrations_table().await.unwrap();
+        for migration in MIGRATOR.iter().filter(|migration| migration.version <= 21) {
+            source.apply(migration).await.unwrap();
+        }
+        let subject = uuid::Uuid::now_v7().to_string();
+        let chapter = uuid::Uuid::now_v7().to_string();
+        let rich = serde_json::json!({"schemaVersion":1,"html":"<p>x<sup>2</sup></p>","plainText":"old-cache"}).to_string();
+        let mut transaction = source.begin().await.unwrap();
+        sqlx::query("INSERT INTO app_meta VALUES (1, ?, 'old-startup-test', 1)")
+            .bind(uuid::Uuid::now_v7().to_string())
+            .execute(&mut *transaction)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO subjects (id, name, name_key, created_at_ms, updated_at_ms) VALUES (?, 'test', 'test', 1, 1)").bind(&subject).execute(&mut *transaction).await.unwrap();
+        sqlx::query("INSERT INTO chapters (id, subject_id, name, name_key, created_at_ms, updated_at_ms) VALUES (?, ?, 'test', 'test', 1, 1)").bind(&chapter).bind(&subject).execute(&mut *transaction).await.unwrap();
+        for index in 0..1025 {
+            sqlx::query("INSERT INTO questions (id, question_type, subject_id, chapter_id, stem_json, answer_json, explanation_json, stem_plain, answer_plain, exact_fingerprint, content_version, created_at_ms, updated_at_ms) VALUES (?, 'short_answer', ?, ?, ?, ?, ?, 'old-cache', 'old-cache', zeroblob(32), 4, 1, 7)")
+                .bind(format!("00000000-0000-7000-8000-{index:012}")).bind(&subject).bind(&chapter).bind(&rich).bind(&rich).bind(&rich)
+                .execute(&mut *transaction).await.unwrap();
+        }
+        transaction.commit().await.unwrap();
+
+        // Model a previous process stopping after one committed rebuild batch.
+        // Only the disposable candidate is deliberately damaged in this fixture.
+        let abandoned = paths
+            .database_file()
+            .parent()
+            .unwrap()
+            .join(".zhitiku-migration-interrupted-test.sqlite3");
+        Database::create_consistent_snapshot(&mut source, &abandoned)
+            .await
+            .unwrap();
+        source.close().await.unwrap();
+        let original = fs::read(paths.database_file()).unwrap();
+        let mut candidate = connect_connection(&abandoned, false).await.unwrap();
+        MIGRATOR.run_direct(&mut candidate).await.unwrap();
+        sqlx::query("UPDATE questions SET stem_json = '{}' WHERE id = '00000000-0000-7000-8000-000000000065'").execute(&mut candidate).await.unwrap();
+        assert!(
+            crate::api::content_identity::rebuild_pending(&mut candidate, None)
+                .await
+                .is_err()
+        );
+        let rebuilt: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE fingerprint_version = 2")
+                .fetch_one(&mut candidate)
+                .await
+                .unwrap();
+        assert_eq!(rebuilt, 64);
+        candidate.close().await.unwrap();
+        assert_eq!(fs::read(paths.database_file()).unwrap(), original);
+        let abandoned_bytes = fs::read(&abandoned).unwrap();
+
+        let progress = StartupProgress::default();
+        progress.start_logging(&root.join("diagnostics"), "test");
+        let database = Database::open_with_progress(&root, "test", &progress)
+            .await
+            .unwrap();
+        let preserved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE fingerprint_version = 2 AND stem_json = ? AND content_version = 4 AND updated_at_ms = 7 AND stem_plain = 'x2'").bind(&rich).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(preserved, 1025);
+        database.close().await;
+        assert_eq!(
+            fs::read(&abandoned).unwrap(),
+            abandoned_bytes,
+            "a prior candidate must never replace the original on retry"
+        );
+        let backups: Vec<_> = fs::read_dir(paths.backup_dir())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(backups.len(), 1);
+        let mut backup = connect_connection(&backups[0], false).await.unwrap();
+        let legacy_rows: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM questions WHERE fingerprint_version = 1 AND stem_json = ?",
+        )
+        .bind(&rich)
+        .fetch_one(&mut backup)
+        .await
+        .unwrap();
+        assert_eq!(legacy_rows, 1025);
+        backup.close().await.unwrap();
+        let log = fs::read_to_string(root.join("diagnostics/logs/startup-latest.jsonl")).unwrap();
+        assert!(log.contains("\"phase\":\"snapshot\""));
+        assert!(log.contains("\"completed\":1025"));
+        assert!(log.contains("\"phase\":\"switched_validation\""));
+        drop(progress);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

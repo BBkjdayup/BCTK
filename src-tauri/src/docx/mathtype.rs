@@ -7,15 +7,14 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    io::{Cursor, Read, Seek, SeekFrom},
+    io::{Cursor, Read, Seek},
 };
 
 use quick_xml::{events::Event, reader::NsReader};
-use zip::ZipArchive;
 
 use super::{
     DocxError, DocxLimits, DocxResult,
-    package::{inspect_archive_with_size, read_part_limited},
+    package::{ValidatedPackage, read_package_bytes},
     xml::{
         NamespaceKind, attribute_value, classify_namespace, decode_reference, local_name,
         validate_safe_xml,
@@ -77,7 +76,7 @@ struct MathTypeMarker {
 /// editable LaTeX. Callers must opt in with `allow_mathtype_ole`; all other
 /// embedded object types remain rejected.
 pub fn read_mathtype_from_docx<R: Read + Seek>(
-    mut source: R,
+    source: R,
     limits: &DocxLimits,
 ) -> DocxResult<Vec<ExtractedMathTypeOccurrence>> {
     if !limits.allow_mathtype_ole {
@@ -85,40 +84,22 @@ pub fn read_mathtype_from_docx<R: Read + Seek>(
             "MathType extraction was requested without the Word-import safety policy",
         ));
     }
-    let declared_size = source.seek(SeekFrom::End(0))?;
-    if declared_size > limits.max_archive_bytes {
-        return Err(DocxError::LimitExceeded {
-            resource: "DOCX archive".to_owned(),
-            limit: limits.max_archive_bytes,
-            actual: declared_size,
-        });
-    }
-    source.seek(SeekFrom::Start(0))?;
-    let capacity = usize::try_from(declared_size).map_err(|_| DocxError::LimitExceeded {
-        resource: "DOCX archive".to_owned(),
-        limit: limits.max_archive_bytes,
-        actual: declared_size,
-    })?;
-    let mut package_bytes = Vec::with_capacity(capacity);
-    let copied = source
-        .take(limits.max_archive_bytes.saturating_add(1))
-        .read_to_end(&mut package_bytes)? as u64;
-    if copied > limits.max_archive_bytes {
-        return Err(DocxError::LimitExceeded {
-            resource: "DOCX archive".to_owned(),
-            limit: limits.max_archive_bytes,
-            actual: copied,
-        });
-    }
+    let bytes = read_package_bytes(source, limits)?;
+    read_mathtype_from_package(&mut ValidatedPackage::open(&bytes, limits)?)
+}
 
-    let archive_size = u64::try_from(package_bytes.len()).unwrap_or(u64::MAX);
-    let mut archive = ZipArchive::new(Cursor::new(&package_bytes))?;
-    let inspection = inspect_archive_with_size(&mut archive, Some(archive_size), limits)?;
-    inspection.ensure_acceptable()?;
-
-    let document_xml = read_part_limited(&mut archive, DOCUMENT_PART, limits.max_xml_part_bytes)?;
-    let markers = parse_mathtype_markers(&document_xml, limits)?;
-    let embedding_parts = inspection
+pub(crate) fn read_mathtype_from_package(
+    package: &mut ValidatedPackage<'_>,
+) -> DocxResult<Vec<ExtractedMathTypeOccurrence>> {
+    let limits = package.limits().clone();
+    if !limits.allow_mathtype_ole {
+        return Err(invalid_mathtype(
+            "MathType extraction was requested without the Word-import safety policy",
+        ));
+    }
+    let markers = parse_mathtype_markers(package.xml_part(DOCUMENT_PART)?, &limits)?;
+    let embedding_parts = package
+        .inspection()
         .parts
         .iter()
         .filter(|part| {
@@ -131,11 +112,21 @@ pub fn read_mathtype_from_docx<R: Read + Seek>(
         .map(|part| part.name.clone())
         .collect::<HashSet<_>>();
 
-    let relationships_xml =
-        read_part_limited(&mut archive, DOCUMENT_RELS_PART, limits.max_xml_part_bytes).map_err(
-            |_| invalid_mathtype("MathType objects require word/_rels/document.xml.rels"),
-        )?;
-    let relationships = parse_mathtype_relationships(&relationships_xml, limits)?;
+    if !package
+        .inspection()
+        .parts
+        .iter()
+        .any(|part| part.name == DOCUMENT_RELS_PART)
+    {
+        if markers.is_empty() && embedding_parts.is_empty() {
+            return Ok(Vec::new());
+        }
+        return Err(invalid_mathtype(
+            "MathType objects require word/_rels/document.xml.rels",
+        ));
+    }
+    let relationships_xml = package.xml_part(DOCUMENT_RELS_PART)?;
+    let relationships = parse_mathtype_relationships(relationships_xml, &limits)?;
     let marker_ids = markers
         .iter()
         .map(|marker| marker.relationship_id.as_str())
@@ -167,19 +158,19 @@ pub fn read_mathtype_from_docx<R: Read + Seek>(
             .get(&marker.relationship_id)
             .ok_or_else(|| invalid_mathtype("MathType relationship disappeared during parsing"))?;
         if !converted_by_part.contains_key(target_part) {
-            let ole_bytes =
-                read_part_limited(&mut archive, target_part, MAX_EQUATION_NATIVE_BYTES as u64)
-                    .map_err(|error| match error {
-                        DocxError::LimitExceeded { actual, .. } => DocxError::LimitExceeded {
-                            resource: target_part.clone(),
-                            limit: MAX_EQUATION_NATIVE_BYTES as u64,
-                            actual,
-                        },
-                        _ => invalid_mathtype(format!(
-                            "MathType relationship {} points to a missing or unreadable object",
-                            marker.relationship_id
-                        )),
-                    })?;
+            let ole_bytes = package
+                .read_part(target_part, MAX_EQUATION_NATIVE_BYTES as u64)
+                .map_err(|error| match error {
+                    DocxError::LimitExceeded { actual, .. } => DocxError::LimitExceeded {
+                        resource: target_part.clone(),
+                        limit: MAX_EQUATION_NATIVE_BYTES as u64,
+                        actual,
+                    },
+                    _ => invalid_mathtype(format!(
+                        "MathType relationship {} points to a missing or unreadable object",
+                        marker.relationship_id
+                    )),
+                })?;
             total_bytes = total_bytes
                 .checked_add(u64::try_from(ole_bytes.len()).unwrap_or(u64::MAX))
                 .ok_or_else(|| DocxError::LimitExceeded {

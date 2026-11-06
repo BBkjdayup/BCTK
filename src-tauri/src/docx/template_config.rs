@@ -2424,7 +2424,9 @@ mod hex_bytes {
         }
         encoded
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let high = hex_digit(pair[0])
                     .ok_or_else(|| D::Error::custom("hex byte string contains invalid data"))?;

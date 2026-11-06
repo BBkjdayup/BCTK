@@ -112,7 +112,7 @@ it('keeps expired authorized members out of pending review and lets the owner re
   expect(view.text()).toContain('待审核 0')
   expect(view.findAll('tr.el-table__row')).toHaveLength(0)
   await view.get('input[type="radio"][value="active"]').setValue()
-  await flushPromises()
+  await new Promise(resolve => setTimeout(resolve, 230)); await flushPromises()
   expect(view.text()).toContain('过期学员')
   expect(view.text()).toContain('套餐已到期')
   expect(view.findAll('button').some(button => button.text() === '驳回')).toBe(false)

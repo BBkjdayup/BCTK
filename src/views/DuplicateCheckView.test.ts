@@ -7,7 +7,11 @@ import DuplicateCheckView from './DuplicateCheckView.vue'
 const mocks = vi.hoisted(() => ({
   scanQuestionDuplicates: vi.fn(),
   ignoreQuestionDuplicate: vi.fn().mockResolvedValue(undefined),
-  moveQuestionsToRecycle: vi.fn().mockResolvedValue(undefined),
+  mergeQuestionDuplicates: vi.fn().mockResolvedValue({ id: 'merge', keeperId: 'question-1', recycledCount: 1, mergedTagCount: 2 }),
+  getQuestions: vi.fn(),
+  latestQuestionDuplicateMerge: vi.fn().mockResolvedValue(null),
+  undoQuestionDuplicateMerge: vi.fn().mockResolvedValue(undefined),
+  cancelQuestionDuplicateScan: vi.fn().mockResolvedValue(undefined),
   getQuestion: vi.fn().mockResolvedValue(null),
   getQuestionStemSummaries: vi.fn(),
   refreshTaxonomy: vi.fn().mockResolvedValue(undefined),
@@ -55,7 +59,11 @@ vi.mock('../services/backend', () => ({
   backend: {
     scanQuestionDuplicates: mocks.scanQuestionDuplicates,
     ignoreQuestionDuplicate: mocks.ignoreQuestionDuplicate,
-    moveQuestionsToRecycle: mocks.moveQuestionsToRecycle,
+    mergeQuestionDuplicates: mocks.mergeQuestionDuplicates,
+    getQuestions: mocks.getQuestions,
+    latestQuestionDuplicateMerge: mocks.latestQuestionDuplicateMerge,
+    undoQuestionDuplicateMerge: mocks.undoQuestionDuplicateMerge,
+    cancelQuestionDuplicateScan: mocks.cancelQuestionDuplicateScan,
     getQuestion: mocks.getQuestion,
     getQuestionStemSummaries: mocks.getQuestionStemSummaries,
   },
@@ -121,7 +129,7 @@ function mountView() {
         ElRadio: { template: '<label><slot /></label>' },
         ElTag: { template: '<span><slot /></span>' },
         ElEmpty: { props: ['description'], template: '<div>{{ description }}</div>' },
-        ElAlert: { props: ['title'], template: '<div>{{ title }}</div>' },
+        ElAlert: { props: ['title'], template: '<div>{{ title }}<slot name="title" /></div>' },
         ElProgress: true,
       },
     },
@@ -130,6 +138,10 @@ function mountView() {
 
 enableAutoUnmount(afterEach)
 beforeEach(() => {
+  mocks.getQuestions.mockImplementation(async (ids: string[]) => (await mocks.getQuestionStemSummaries(ids)).map((row: { id: string; contentVersion: number; stem: unknown }) => ({
+    ...member(row.id, row.contentVersion, ''), ...row, deletedAt: null,
+    tags: [{ id: row.id + '-tag', name: row.id === 'question-1' ? '期中' : '重点' }], options: [], answer: row.stem, explanation: row.stem,
+  })))
   mocks.getQuestionStemSummaries.mockImplementation(async (ids: string[]) => ids.map((id) => ({
     id, contentVersion: id === 'question-1' ? 3 : 4,
     stem: { schemaVersion: 1, html: '<p>完整题干</p>', plainText: '完整题干' },
@@ -171,6 +183,8 @@ describe('DuplicateCheckView', () => {
     await flushPromises()
     expect(dialog.findAll('.katex')).toHaveLength(2)
     expect(dialog.text()).toContain('其余 1 道题移入回收站')
+    expect(dialog.text()).toContain('期中、重点')
+    expect(dialog.text()).toContain('本组分类不同')
   })
 
   it('does not recycle when the scanned question has changed', async () => {
@@ -182,7 +196,7 @@ describe('DuplicateCheckView', () => {
     await recycle.trigger('click')
     await flushPromises()
     expect(mocks.confirm).not.toHaveBeenCalled()
-    expect(mocks.moveQuestionsToRecycle).not.toHaveBeenCalled()
+    expect(mocks.mergeQuestionDuplicates).not.toHaveBeenCalled()
     expect(wrapper.text()).toContain('题目已修改或移除')
   })
 
@@ -195,7 +209,7 @@ describe('DuplicateCheckView', () => {
     await recycle.trigger('click')
     await flushPromises()
     expect(mocks.confirm).toHaveBeenCalled()
-    expect(mocks.moveQuestionsToRecycle).not.toHaveBeenCalled()
+    expect(mocks.mergeQuestionDuplicates).not.toHaveBeenCalled()
   })
 
   it('scans the selected scope and automatically shows the only non-empty tab', async () => {
@@ -206,7 +220,7 @@ describe('DuplicateCheckView', () => {
     expect(mocks.scanQuestionDuplicates).toHaveBeenCalledWith({
       subjectId: 'subject-1',
       chapterId: 'chapter-1',
-    })
+    }, expect.any(String))
     expect(bankStore.filters).toMatchObject({
       subjectId: 'subject-1',
       chapterId: 'chapter-1',
@@ -244,8 +258,41 @@ describe('DuplicateCheckView', () => {
     await flushPromises()
 
     expect(mocks.confirm).toHaveBeenCalled()
-    expect(mocks.moveQuestionsToRecycle).toHaveBeenCalledWith(['question-2'])
+    expect(mocks.mergeQuestionDuplicates).toHaveBeenCalledWith({ keeperId: 'question-1', duplicateKind: 'exact', members: [{ id: 'question-1', expectedContentVersion: 3 }, { id: 'question-2', expectedContentVersion: 4 }] })
     expect(mocks.refreshTaxonomy).toHaveBeenCalled()
     expect(mocks.scanQuestionDuplicates).toHaveBeenCalledTimes(2)
   })
+})
+
+it('sends cancellation to the active backend scan before leaving', async () => {
+  mocks.scanQuestionDuplicates.mockImplementationOnce(() => new Promise(() => {}))
+  const wrapper = mountView(); await flushPromises()
+  const id = mocks.scanQuestionDuplicates.mock.calls[0]![1]
+  await wrapper.findAll('button').find(b => b.text() === '取消检查')!.trigger('click')
+  expect(mocks.cancelQuestionDuplicateScan).toHaveBeenCalledWith(id)
+  expect(mocks.push).toHaveBeenCalledWith('/questions')
+})
+it('can undo the last successful merge', async () => {
+  mocks.scanQuestionDuplicates.mockResolvedValue(result('exact'))
+  const wrapper = mountView(); await flushPromises()
+  await wrapper.findAll('button').find(b => b.text().includes('其余移入回收站'))!.trigger('click'); await flushPromises()
+  await wrapper.findAll('button').find(b => b.text() === '撤销这次归并')!.trigger('click'); await flushPromises()
+  expect(mocks.undoQuestionDuplicateMerge).toHaveBeenCalledWith('merge')
+})
+
+it.each([null, { id: 'older-merge', keeperId: 'question-2', recycledCount: 2, mergedTagCount: 3 }])('keeps the new merge receipt when an older initial lookup completes: %j', async (olderReceipt) => {
+  let finishInitialLookup!: (value: typeof olderReceipt) => void
+  mocks.latestQuestionDuplicateMerge.mockImplementationOnce(() => new Promise((resolve) => { finishInitialLookup = resolve }))
+  mocks.scanQuestionDuplicates.mockResolvedValue(result('exact'))
+  const wrapper = mountView()
+  await flushPromises()
+  await wrapper.findAll('button').find(b => b.text().includes('其余移入回收站'))!.trigger('click')
+  await flushPromises()
+  finishInitialLookup(olderReceipt)
+  await flushPromises()
+  const undo = wrapper.findAll('button').find(b => b.text() === '撤销这次归并')
+  expect(undo).toBeDefined()
+  await undo!.trigger('click')
+  await flushPromises()
+  expect(mocks.undoQuestionDuplicateMerge).toHaveBeenCalledWith('merge')
 })

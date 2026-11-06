@@ -4,17 +4,21 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type TableInstance } from 'element-plus'
 import { Delete, EditPen, View, RefreshLeft } from '@element-plus/icons-vue'
 import AppContextMenu from '../components/AppContextMenu.vue'
+import QuestionLibraryTools from '../components/QuestionLibraryTools.vue'
+import QuestionHistoryDialog from '../components/QuestionHistoryDialog.vue'
 import QuestionPreviewDrawer from '../components/QuestionPreviewDrawer.vue'
 import QuestionBatchEditDialog from '../components/QuestionBatchEditDialog.vue'
 import QuestionStemSummary from '../components/QuestionStemSummary.vue'
 import { useAppStore } from '../stores/app'
 import { usePaperStore } from '../stores/paper'
 import { useQuestionBankStore } from '../stores/questionBank'
-import { backend } from '../services/backend'
+import { backend, isDesktopRuntime } from '../services/backend'
 import { errorMessage } from '../services/errors'
 import {
   type Question,
+  type QuestionSummary,
   type QuestionBatchEditRequest,
+  type QuestionFilters,
 } from '../types/domain'
 import type { ContextMenuItem } from '../types/contextMenu'
 import { questionBankContextMenuItems } from '../utils/questionBankContextMenu'
@@ -28,16 +32,22 @@ const paperStore = usePaperStore()
 const table = ref<TableInstance>()
 const previewOpen = ref(false)
 const batchDialogOpen = ref(false)
+const historyOpen=ref(false), historyQuestion=ref<QuestionSummary|null>(null)
+function history(row:QuestionSummary){historyQuestion.value=row;historyOpen.value=true}
+function applyPreset(filters:QuestionFilters){bankStore.initializeFilters(filters);void bankStore.load()}
+function libraryChanged(){void Promise.all([bankStore.load(),appStore.refreshTaxonomy()])}
 const batchBusy = ref(false)
-const batchQuestions = ref<Question[]>([])
+const batchQuestions = ref<QuestionSummary[]>([])
 const contextMenuOpen = ref(false)
 const contextMenuX = ref(0)
 const contextMenuY = ref(0)
 const contextMenuTitle = ref('')
 const contextMenuItems = ref<ContextMenuItem[]>([])
-const contextQuestions = ref<Question[]>([])
+const contextQuestions = ref<QuestionSummary[]>([])
 const recycleRetentionDays = ref(30)
 let filterTimer: ReturnType<typeof setTimeout> | undefined
+let previewSequence = 0
+const addingToPaper = ref(false)
 
 bankStore.initializeFilters({ deleted: false, pageSize: 100 })
 
@@ -61,6 +71,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  previewSequence++
   clearTimeout(filterTimer)
   window.removeEventListener('keydown', onKeydown)
 })
@@ -96,29 +107,53 @@ watch(
   },
 )
 
-function onSelectionChange(items: Question[]) {
+function onSelectionChange(items: QuestionSummary[]) {
   bankStore.selectedIds = items.map((item) => item.id)
 }
 
-function openPreview(question: Question) {
-  bankStore.previewQuestion = question
-  previewOpen.value = true
-}
-
-function addToPaper(question: Question) {
-  addQuestionsToPaper([question])
-}
-
-function addQuestionsToPaper(questions: Question[]) {
-  const added = paperStore.addQuestions(questions)
-  if (!added) {
-    ElMessage.warning('所选题目已经在当前试卷中。')
-    return
+async function openPreview(question: QuestionSummary) {
+  const sequence = ++previewSequence
+  try {
+    const detail = await backend.getQuestion(question.id)
+    if (sequence !== previewSequence) return
+    if (!detail || detail.deletedAt || detail.contentVersion !== question.contentVersion) {
+      await bankStore.load()
+      ElMessage.warning('题目已变化，请从刷新后的列表重新预览')
+      return
+    }
+    bankStore.previewQuestion = detail
+    previewOpen.value = true
+  } catch (reason) {
+    if (sequence === previewSequence) ElMessage.error(errorMessage(reason, '题目读取失败'))
   }
-  const omitted = questions.length - added
-  ElMessage.success(omitted > 0
-    ? `已加入 ${added} 道，跳过 ${omitted} 道已选题目。`
-    : `已加入当前试卷，共 ${paperStore.current.items.length} 题`)
+}
+
+function addToPaper(question: QuestionSummary) {
+  void addQuestionsToPaper([question])
+}
+
+async function addQuestionsToPaper(questions: QuestionSummary[]) {
+  if (!questions.length || addingToPaper.value) return
+  addingToPaper.value = true
+  const paperId = paperStore.current.id
+  try {
+    const details: Question[] = await backend.getQuestions(questions.map(q => q.id))
+    if (paperStore.current.id !== paperId) throw new Error('当前试卷已切换，请重新添加题目')
+    if (details.length !== questions.length || details.some((q, index) => q.deletedAt || q.id !== questions[index]?.id || q.contentVersion !== questions[index]?.contentVersion)) {
+      await bankStore.load()
+      throw new Error('所选题目已变化，请从刷新后的列表重新选择')
+    }
+    const added = paperStore.addQuestions(details)
+    if (!added) {
+      ElMessage.warning('所选题目已经在当前试卷中。')
+      return
+    }
+    const omitted = questions.length - added
+    ElMessage.success(omitted > 0
+      ? `已加入 ${added} 道，跳过 ${omitted} 道已选题目。`
+      : `已加入当前试卷，共 ${paperStore.current.items.length} 题`)
+  } catch (reason) { ElMessage.error(errorMessage(reason, '读取组卷题目失败')) }
+  finally { addingToPaper.value = false }
 }
 
 function addSelectedToPaper() {
@@ -130,7 +165,7 @@ function selectedQuestions() {
   return bankStore.questions.filter((question) => bankStore.selectedIds.includes(question.id))
 }
 
-function openBatchEditFor(questions: Question[]) {
+function openBatchEditFor(questions: QuestionSummary[]) {
   if (!questions.length) {
     ElMessage.warning('请先选择要批量编辑的题目')
     return
@@ -151,7 +186,7 @@ async function applyBatchEdit(request: QuestionBatchEditRequest) {
     table.value?.clearSelection()
     batchDialogOpen.value = false
     batchQuestions.value = []
-    ElMessage.success(`已原子更新 ${result.updatedCount} 道题`)
+    ElMessage.success(`已更新 ${result.updatedCount} 道题`)
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '批量编辑未执行，请刷新后重试'))
   } finally {
@@ -159,7 +194,7 @@ async function applyBatchEdit(request: QuestionBatchEditRequest) {
   }
 }
 
-async function removeQuestions(questions: Question[]) {
+async function removeQuestions(questions: QuestionSummary[]) {
   const ids = questions.map((question) => question.id)
   if (!ids.length) return
   try {
@@ -184,7 +219,7 @@ async function removeSelected() {
   await removeQuestions(selectedQuestions())
 }
 
-async function copyQuestionStem(question: Question) {
+async function copyQuestionStem(question: QuestionSummary) {
   try {
     await navigator.clipboard.writeText(question.stem.plainText)
     ElMessage.success('题干文字已复制')
@@ -193,7 +228,7 @@ async function copyQuestionStem(question: Question) {
   }
 }
 
-function openQuestionContextMenu(row: Question, _column: unknown, event: MouseEvent) {
+function openQuestionContextMenu(row: QuestionSummary, _column: unknown, event: MouseEvent) {
   event.preventDefault()
   const selected = selectedQuestions()
   const useSelection = selected.length > 1 && selected.some((question) => question.id === row.id)
@@ -262,6 +297,8 @@ function formatDate(value?: number | null) {
       <el-button :icon="RefreshLeft" @click="bankStore.resetFilters">重置</el-button>
     </div>
 
+    <QuestionLibraryTools v-if="isDesktopRuntime()" :filters="bankStore.filters" @apply="applyPreset" @changed="libraryChanged"/>
+    <QuestionHistoryDialog v-model="historyOpen" :question="historyQuestion" @restored="libraryChanged"/>
     <div v-if="bankStore.hasSelection" class="selection-bar">
       <span>已选择 <strong>{{ bankStore.selectedIds.length }}</strong> 道题</span>
       <div>
@@ -307,8 +344,9 @@ function formatDate(value?: number | null) {
           <el-table-column label="更新时间" width="112">
             <template #default="{ row }">{{ formatDate(row.updatedAt) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="170" fixed="right">
+          <el-table-column label="操作" width="220" fixed="right">
             <template #default="{ row }">
+              <el-button v-if="isDesktopRuntime()" link @click="history(row)">历史</el-button>
               <el-button link type="primary" :icon="View" @click="openPreview(row)">预览</el-button>
               <el-button link type="primary" @click="router.push(`/questions/${row.id}/edit`)">编辑</el-button>
               <el-button link type="primary" @click="router.push({ path: '/questions/new', query: { copy: row.id } })">复制</el-button>

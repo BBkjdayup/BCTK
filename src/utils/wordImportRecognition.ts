@@ -19,6 +19,9 @@ export interface WordAnalysisTableCell {
 
 export interface WordAnalysisTable {
   rows: WordAnalysisTableCell[][]
+  widthPx?: number | null
+  columnWidthsPx?: number[]
+  rowMinHeightsPx?: Array<number | null>
 }
 
 export type WordQuestionSection =
@@ -401,7 +404,7 @@ function optionMarkers(text: string): OptionMarker[] {
     const adjacentEmptyOption = previousMarker?.contentStart === markerStart
     const atBoundary = markerStart === 0 || /\s/u.test(previous) || adjacentEmptyOption
     const nextText = text.slice(optionMarkerPattern.lastIndex)
-    const pointList = match[0].includes('、') && /^[A-H]/iu.test(nextText)
+    const pointList = match[0].includes('、') && /^[A-H](?=[、，,]|\s*(?:[两三四五六七八]点|点))/iu.test(nextText)
     if (atBoundary && !pointList) {
       matches.push({
         label: normalizedLetter(match[1] ?? ''),

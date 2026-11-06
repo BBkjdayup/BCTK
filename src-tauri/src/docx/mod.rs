@@ -20,26 +20,33 @@ mod rich_content;
 mod template;
 mod template_config;
 mod template_package;
+mod template_source;
 mod types;
 mod wmf;
 mod xml;
 
 pub use diagnostic::{Diagnostic, DiagnosticSeverity};
 pub use document::{
-    DocumentTable, FORMULA_PLACEHOLDER, Paragraph, ScriptKind, ScriptRun, parse_document_xml,
-    read_document_from_docx,
+    DocumentTable, FORMULA_PLACEHOLDER, Paragraph, ParsedDocument, ScriptKind, ScriptRun,
+    parse_document_xml,
 };
 pub use error::{DocxError, DocxResult};
 pub use export::{
     RawCopyExport, raw_copy_with_replacements, raw_copy_with_replacements_and_additions,
     raw_copy_with_replacements_and_removals,
 };
+pub use images::ExtractedImageOccurrence;
 pub(crate) use images::inspect_raster_image;
-pub use images::{ExtractedImageOccurrence, read_images_from_docx};
+pub(crate) use images::read_images_from_package;
 pub use limits::DocxLimits;
+pub(crate) use mathtype::read_mathtype_from_package;
 pub use mathtype::{ExtractedMathTypeOccurrence, read_mathtype_from_docx};
+pub use omml::ExtractedEditableFormulaOccurrence;
+pub(crate) use omml::read_omml_from_document;
+#[cfg(test)]
+pub use omml::read_omml_from_docx;
 pub(crate) use omml::unicode_math_text_to_latex;
-pub use omml::{ExtractedEditableFormulaOccurrence, read_omml_from_docx};
+pub(crate) use package::ValidatedPackage;
 #[cfg(test)]
 pub(crate) use package::test_support::minimal_docx;
 pub use package::{PackageInspection, PackageKind, inspect_docx};
@@ -61,4 +68,5 @@ pub use template_config::{
 pub use template_package::{
     TemplatePackageAnalysis, analyze_template_package, analyze_template_package_with_requirements,
 };
+pub(crate) use template_source::prepare_template_source;
 pub use types::ByteSpan;

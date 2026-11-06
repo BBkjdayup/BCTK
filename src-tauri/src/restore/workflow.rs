@@ -29,6 +29,10 @@ const RESTORE_STATE_VERSION: u32 = 1;
 const RESTORE_PLAN_LIFETIME_MS: i64 = 30 * 60 * 1_000;
 const MAX_RESTORE_STATE_BYTES: u64 = 2 * 1024 * 1024;
 const COMPONENTS: [&str; 3] = ["database", "resources", "templates"];
+// Created before any rollback move and retained after it completes. Besides
+// preserving the rejected candidate, this directory records the rollback phase
+// across restarts, including journals left by versions without this check.
+const ROLLBACK_STAGING_DIR: &str = "failed-new";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -189,7 +193,7 @@ pub async fn cancel_restore(state: &AppState, restore_token: &str) -> CommandRes
     }
     let operation_dir = checked_operation_dir(&restore_root, &operation_id)?;
     if operation_dir.join("old").exists()
-        || operation_dir.join("failed-new").exists()
+        || operation_dir.join(ROLLBACK_STAGING_DIR).exists()
         || operation_dir.join("terminal.json").exists()
     {
         return Err(CommandError::new(
@@ -356,13 +360,13 @@ pub async fn apply_pending_restore(data_root: &Path) -> CommandResult<Option<Res
         remove_file_if_exists(&active_path, "无法清除已完成的恢复标记")?;
         return Ok(Some(result));
     }
-    if interrupted_switch_started(&operation_dir)? {
+    if interrupted_restore_needs_rollback(&operation_dir)? {
         let started_at = now_millis()?;
         rollback_operation(data_root, &operation_dir).map_err(|rollback_error| {
             CommandError::new(
                 "RESTORE_INTERRUPTED_ROLLBACK_FAILED",
                 format!(
-                    "检测到上次恢复在目录切换中中断，自动回滚失败：{}。新旧目录均保持原状，软件不会创建空数据库。",
+                    "检测到上次恢复尚未完成，自动回滚失败：{}。现有的新旧数据均已保留，软件不会创建空数据库。",
                     rollback_error.message
                 ),
             )
@@ -444,7 +448,7 @@ pub async fn apply_pending_restore(data_root: &Path) -> CommandResult<Option<Res
                     return Err(CommandError::new(
                         "RESTORE_ROLLBACK_FAILED",
                         format!(
-                            "恢复切换失败（{}），自动回滚也失败（{}）。所有新旧目录均保留在“{}”，软件不会创建空数据库。",
+                            "恢复切换失败（{}），自动回滚也失败（{}）。现有的新旧数据保留在当前数据目录和恢复工作目录“{}”中，软件不会创建空数据库。",
                             error.message,
                             rollback_error.message,
                             operation_dir.display()
@@ -659,10 +663,33 @@ fn remove_file_if_exists(path: &Path, context: &str) -> CommandResult<()> {
     }
 }
 
-fn interrupted_switch_started(operation_dir: &Path) -> CommandResult<bool> {
+fn interrupted_restore_needs_rollback(operation_dir: &Path) -> CommandResult<bool> {
+    let rollback_started = match fs::symlink_metadata(operation_dir.join(ROLLBACK_STAGING_DIR)) {
+        Ok(_) => {
+            // A file, symlink or path outside this operation is not a valid
+            // rollback marker. Fail closed instead of starting another switch.
+            direct_real_child(operation_dir, ROLLBACK_STAGING_DIR, "失败候选保留目录")?;
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => {
+            return Err(CommandError::new(
+                "RESTORE_ROLLBACK_STAGING_FAILED",
+                format!("无法检查回滚阶段目录：{error}"),
+            ));
+        }
+    };
     let old_path = operation_dir.join("old");
     match fs::symlink_metadata(&old_path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if rollback_started {
+                return Err(CommandError::new(
+                    "RESTORE_ROLLBACK_SOURCE_MISSING",
+                    "回滚阶段记录仍在，但原数据保留目录缺失，已停止恢复。",
+                ));
+            }
+            return Ok(false);
+        }
         Err(error) => {
             return Err(CommandError::new(
                 "RESTORE_OLD_DIRECTORY_INVALID",
@@ -672,6 +699,12 @@ fn interrupted_switch_started(operation_dir: &Path) -> CommandResult<bool> {
         Ok(_) => {}
     }
     let old = direct_real_child(operation_dir, "old", "原数据保留目录")?;
+    if rollback_started {
+        // old/ becomes empty after the last original component moves home.
+        // Still run the idempotent rollback to verify all live components and
+        // finish terminal.json; incoming/ is no longer a complete candidate.
+        return Ok(true);
+    }
     for name in COMPONENTS {
         match fs::symlink_metadata(old.join(name)) {
             Ok(_) => return Ok(true),
@@ -749,7 +782,7 @@ fn rollback_operation(data_root: &Path, operation_dir: &Path) -> CommandResult<(
         return Ok(());
     }
     let old = direct_real_child(operation_dir, "old", "原数据保留目录")?;
-    let failed_new = operation_dir.join("failed-new");
+    let failed_new = operation_dir.join(ROLLBACK_STAGING_DIR);
     if !failed_new.exists() {
         fs::create_dir(&failed_new).map_err(|error| {
             CommandError::new(
@@ -758,7 +791,9 @@ fn rollback_operation(data_root: &Path, operation_dir: &Path) -> CommandResult<(
             )
         })?;
     }
-    let failed_new = direct_real_child(operation_dir, "failed-new", "失败候选保留目录")?;
+    // This persisted stage marker must exist before moving any original back.
+    // Keep it even when no candidate component was installed or all moves finish.
+    let failed_new = direct_real_child(operation_dir, ROLLBACK_STAGING_DIR, "失败候选保留目录")?;
     for name in COMPONENTS.into_iter().rev() {
         let live = data_root.join(name);
         let retained = old.join(name);
@@ -1335,6 +1370,10 @@ fn now_millis() -> CommandResult<i64> {
         })?;
     Ok(elapsed.as_millis().min(i64::MAX as u128) as i64)
 }
+
+#[cfg(test)]
+#[path = "workflow_tests.rs"]
+mod interruption_tests;
 
 #[cfg(test)]
 mod tests {

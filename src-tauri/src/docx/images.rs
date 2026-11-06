@@ -1,14 +1,10 @@
-use std::{
-    collections::{HashMap, HashSet},
-    io::{Cursor, Read, Seek, SeekFrom},
-};
+use std::collections::{HashMap, HashSet};
 
 use quick_xml::{events::Event, reader::NsReader};
-use zip::ZipArchive;
 
 use super::{
     DocxError, DocxLimits, DocxResult,
-    package::{inspect_archive_with_size, read_part_limited},
+    package::ValidatedPackage,
     xml::{
         NamespaceKind, attribute_value, classify_namespace, decode_reference, local_name,
         validate_safe_xml,
@@ -66,61 +62,22 @@ struct DecodedImage {
     bytes: Vec<u8>,
 }
 
-/// Reads one bounded source into memory once, validates that exact byte
-/// sequence as a DOCX/OPC package, and extracts embedded PNG/JPEG occurrences
-/// from the main document part.
-pub fn read_images_from_docx<R: Read + Seek>(
-    mut source: R,
+#[cfg(test)]
+fn read_images_from_docx<R: std::io::Read + std::io::Seek>(
+    source: R,
     limits: &DocxLimits,
 ) -> DocxResult<Vec<ExtractedImageOccurrence>> {
-    let declared_size = source.seek(SeekFrom::End(0))?;
-    if declared_size > limits.max_archive_bytes {
-        return Err(DocxError::LimitExceeded {
-            resource: "DOCX archive".to_owned(),
-            limit: limits.max_archive_bytes,
-            actual: declared_size,
-        });
-    }
-    source.seek(SeekFrom::Start(0))?;
-    let capacity = usize::try_from(declared_size).map_err(|_| DocxError::LimitExceeded {
-        resource: "DOCX archive".to_owned(),
-        limit: limits.max_archive_bytes,
-        actual: declared_size,
-    })?;
-    let mut package_bytes = Vec::with_capacity(capacity);
-    let copied = source
-        .take(limits.max_archive_bytes.saturating_add(1))
-        .read_to_end(&mut package_bytes)? as u64;
-    if copied > limits.max_archive_bytes {
-        return Err(DocxError::LimitExceeded {
-            resource: "DOCX archive".to_owned(),
-            limit: limits.max_archive_bytes,
-            actual: copied,
-        });
-    }
-    read_images_from_bounded_bytes(&package_bytes, limits)
+    let bytes = super::package::read_package_bytes(source, limits)?;
+    read_images_from_package(&mut ValidatedPackage::open(&bytes, limits)?)
 }
 
-fn read_images_from_bounded_bytes(
-    package_bytes: &[u8],
-    limits: &DocxLimits,
+pub(crate) fn read_images_from_package(
+    package: &mut ValidatedPackage<'_>,
 ) -> DocxResult<Vec<ExtractedImageOccurrence>> {
-    let archive_size = u64::try_from(package_bytes.len()).unwrap_or(u64::MAX);
-    if archive_size > limits.max_archive_bytes {
-        return Err(DocxError::LimitExceeded {
-            resource: "DOCX archive".to_owned(),
-            limit: limits.max_archive_bytes,
-            actual: archive_size,
-        });
-    }
-
-    let mut archive = ZipArchive::new(Cursor::new(package_bytes))?;
-    let inspection = inspect_archive_with_size(&mut archive, Some(archive_size), limits)?;
-    inspection.ensure_acceptable()?;
-
-    let document_xml = read_part_limited(&mut archive, DOCUMENT_PART, limits.max_xml_part_bytes)?;
-    let markers = parse_image_markers(&document_xml, limits)?;
-    let has_document_relationships = inspection
+    let limits = package.limits().clone();
+    let markers = parse_image_markers(package.xml_part(DOCUMENT_PART)?, &limits)?;
+    let has_document_relationships = package
+        .inspection()
         .parts
         .iter()
         .any(|part| !part.is_directory && part.name == DOCUMENT_RELS_PART);
@@ -128,15 +85,12 @@ fn read_images_from_bounded_bytes(
         return Ok(Vec::new());
     }
 
-    let relationships_xml =
-        read_part_limited(&mut archive, DOCUMENT_RELS_PART, limits.max_xml_part_bytes).map_err(
-            |_| {
-                invalid_relationships(
-                    "word/document.xml contains an image, but its relationship part is missing",
-                )
-            },
-        )?;
-    let relationships = parse_image_relationships(&relationships_xml, limits)?;
+    let relationships_xml = package.xml_part(DOCUMENT_RELS_PART).map_err(|_| {
+        invalid_relationships(
+            "word/document.xml contains an image, but its relationship part is missing",
+        )
+    })?;
+    let relationships = parse_image_relationships(relationships_xml, &limits)?;
     if markers.is_empty() {
         return Ok(Vec::new());
     }
@@ -153,19 +107,19 @@ fn read_images_from_bounded_bytes(
         })?;
 
         if !decoded_by_part.contains_key(&relationship.target_part) {
-            let source_bytes =
-                read_part_limited(&mut archive, &relationship.target_part, MAX_IMAGE_BYTES)
-                    .map_err(|error| match error {
-                        DocxError::LimitExceeded { actual, .. } => DocxError::LimitExceeded {
-                            resource: relationship.target_part.clone(),
-                            limit: MAX_IMAGE_BYTES,
-                            actual,
-                        },
-                        _ => invalid_relationships(format!(
-                            "image relationship {} points to a missing or unreadable part {}",
-                            marker.relationship_id, relationship.target_part
-                        )),
-                    })?;
+            let source_bytes = package
+                .read_part(&relationship.target_part, MAX_IMAGE_BYTES)
+                .map_err(|error| match error {
+                    DocxError::LimitExceeded { actual, .. } => DocxError::LimitExceeded {
+                        resource: relationship.target_part.clone(),
+                        limit: MAX_IMAGE_BYTES,
+                        actual,
+                    },
+                    _ => invalid_relationships(format!(
+                        "image relationship {} points to a missing or unreadable part {}",
+                        marker.relationship_id, relationship.target_part
+                    )),
+                })?;
             let image_label = format!(
                 "第 {} 张图片（{}）",
                 image_index + 1,

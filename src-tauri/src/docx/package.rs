@@ -1,6 +1,6 @@
 use std::{
-    collections::BTreeSet,
-    io::{self, Read, Seek, SeekFrom},
+    collections::{BTreeSet, HashMap},
+    io::{self, Cursor, Read, Seek, SeekFrom},
 };
 
 use quick_xml::{events::Event, reader::NsReader};
@@ -66,6 +66,100 @@ impl PackageInspection {
             Err(DocxError::rejected(self.diagnostics.clone()))
         }
     }
+}
+
+/// One immutable byte sequence and policy, validated before any import extractor runs.
+/// Cache only shared XML parts; decoded media retains its own aggregate limits.
+pub(crate) struct ValidatedPackage<'a> {
+    archive: ZipArchive<Cursor<&'a [u8]>>,
+    inspection: PackageInspection,
+    limits: DocxLimits,
+    xml_parts: HashMap<String, Vec<u8>>,
+}
+
+impl<'a> ValidatedPackage<'a> {
+    pub(crate) fn open(bytes: &'a [u8], limits: &DocxLimits) -> DocxResult<Self> {
+        let archive_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if let Some(diagnostic) = archive_size_diagnostic(archive_bytes, limits) {
+            return Err(DocxError::rejected(vec![diagnostic]));
+        }
+        let mut source = Cursor::new(bytes);
+        let declared_entries = declared_zip_entry_count(&mut source, archive_bytes)?;
+        source.set_position(0);
+        let mut archive = ZipArchive::new(source)?;
+        let inspection = inspect_archive_with_declared_entries(
+            &mut archive,
+            Some(archive_bytes),
+            declared_entries,
+            limits,
+        )?;
+        inspection.ensure_acceptable()?;
+        Ok(Self {
+            archive,
+            inspection,
+            limits: limits.clone(),
+            xml_parts: HashMap::new(),
+        })
+    }
+
+    pub(crate) fn inspection(&self) -> &PackageInspection {
+        &self.inspection
+    }
+
+    pub(super) fn limits(&self) -> &DocxLimits {
+        &self.limits
+    }
+
+    pub(super) fn xml_part(&mut self, name: &str) -> DocxResult<&[u8]> {
+        if !self.xml_parts.contains_key(name) {
+            let bytes = read_part_limited(&mut self.archive, name, self.limits.max_xml_part_bytes)?;
+            self.xml_parts.insert(name.to_owned(), bytes);
+        }
+        Ok(self.xml_parts.get(name).expect("XML was cached above"))
+    }
+
+    pub(super) fn read_part(&mut self, name: &str, limit: u64) -> DocxResult<Vec<u8>> {
+        read_part_limited(&mut self.archive, name, limit)
+    }
+
+    pub(crate) fn read_document(&mut self) -> DocxResult<super::document::ParsedDocument> {
+        let limits = self.limits.clone();
+        let mut document =
+            super::document::parse_document_xml(self.xml_part(DOCUMENT_PART)?, &limits)?;
+        document.diagnostics.extend(
+            self.inspection
+                .diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.severity != DiagnosticSeverity::Error)
+                .cloned(),
+        );
+        Ok(document)
+    }
+}
+
+pub(super) fn read_package_bytes<R: Read + Seek>(
+    mut source: R,
+    limits: &DocxLimits,
+) -> DocxResult<Vec<u8>> {
+    let declared_size = source.seek(SeekFrom::End(0))?;
+    let too_large = |actual| DocxError::LimitExceeded {
+        resource: "DOCX archive".to_owned(),
+        limit: limits.max_archive_bytes,
+        actual,
+    };
+    if declared_size > limits.max_archive_bytes {
+        return Err(too_large(declared_size));
+    }
+    source.seek(SeekFrom::Start(0))?;
+    let capacity = usize::try_from(declared_size).map_err(|_| too_large(declared_size))?;
+    let mut bytes = Vec::with_capacity(capacity);
+    let copied = source
+        .take(limits.max_archive_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)? as u64;
+    if copied > limits.max_archive_bytes {
+        return Err(too_large(copied));
+    }
+    Ok(bytes)
 }
 
 /// Inspects a DOCX reader from byte zero and restores no caller-visible state.
@@ -581,7 +675,7 @@ pub(crate) fn scan_relationships(
                     diagnostics.push(Diagnostic::error(
                         "DOCX_EXTERNAL_RELATIONSHIP",
                         Some(part_name),
-                        format!("external target is not allowed: {target}"),
+                        format!("文档包含外部引用，当前不支持导入；请先解除引用或将内容嵌入文件：{target}"),
                     ));
                 }
                 let forbidden_relationship = [
@@ -598,7 +692,7 @@ pub(crate) fn scan_relationships(
                     diagnostics.push(Diagnostic::error(
                         "DOCX_ACTIVE_RELATIONSHIP",
                         Some(part_name),
-                        format!("active relationship type is not allowed: {relationship_type}"),
+                        format!("文档包含不支持的活动内容关联：{relationship_type}"),
                     ));
                 }
             }
@@ -745,6 +839,113 @@ mod tests {
     use std::io::Cursor;
 
     use super::{test_support::*, *};
+
+    #[test]
+    fn shared_import_package_preserves_text_tables_images_and_formulas() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+            xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"><w:body>
+            <w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:drawing><a:blip r:embed="rImg"/></w:drawing></w:r>
+            <m:oMath><m:r><m:t>x</m:t></m:r></m:oMath><w:r><w:t>world</w:t></w:r></w:p>
+            <w:tbl><w:tr><w:tc><w:p><w:r><w:t>cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+            </w:body></w:document>"#;
+        let rels = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+            <Relationship Id="rImg" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image.png"/>
+            </Relationships>"#;
+        let mut png_bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 1, 1);
+            encoder.set_color(png::ColorType::Rgb);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[255, 255, 255])
+                .unwrap();
+        }
+        let bytes = package_with_entries(&[
+            ("[Content_Types].xml", CONTENT_TYPES.as_bytes()),
+            ("_rels/.rels", ROOT_RELS.as_bytes()),
+            (DOCUMENT_PART, xml.as_bytes()),
+            ("word/_rels/document.xml.rels", rels),
+            ("word/media/image.png", &png_bytes),
+        ]);
+        let limits = DocxLimits {
+            allow_mathtype_ole: true,
+            ..DocxLimits::default()
+        };
+        let mut package = ValidatedPackage::open(&bytes, &limits).unwrap();
+        let document = package.read_document().unwrap();
+        let images = crate::docx::read_images_from_package(&mut package).unwrap();
+        let formulas = crate::docx::read_omml_from_document(&document).unwrap();
+        assert!(
+            crate::docx::read_mathtype_from_package(&mut package)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(document.paragraphs[0].logical_text, "Hello\u{fffc}world");
+        assert_eq!(document.tables[0].rows[0][0].paragraph_indices, vec![1]);
+        assert_eq!((images.len(), images[0].text_char_offset), (1, 5));
+        assert_eq!(images[0].bytes, png_bytes);
+        assert_eq!((formulas.len(), formulas[0].text_char_offset), (1, 5));
+        assert_eq!(formulas[0].latex, "x");
+        // Later extractors must not leave the shared archive at an unusable position.
+        assert_eq!(
+            images,
+            crate::docx::read_images_from_package(&mut package).unwrap()
+        );
+    }
+
+    #[test]
+    #[ignore = "manual parsing benchmark; no wall-clock assertion"]
+    fn benchmark_shared_document_parsing() {
+        for count in [100, 1_000, 5_000] {
+            let paragraphs = (0..count)
+                .map(|index| {
+                    format!(
+                        "<w:p><w:r><w:t>Question {index}: unique content {}</w:t></w:r></w:p>",
+                        index * 37
+                    )
+                })
+                .collect::<String>();
+            let xml = format!(
+                r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{paragraphs}</w:body></w:document>"#
+            );
+            let bytes = minimal_docx(&xml);
+            let limits = DocxLimits::default();
+            let mut repeated_times = Vec::new();
+            let mut shared_times = Vec::new();
+            for _ in 0..3 {
+                let start = std::time::Instant::now();
+                for _ in 0..3 {
+                    let document = ValidatedPackage::open(&bytes, &limits)
+                        .unwrap()
+                        .read_document()
+                        .unwrap();
+                    assert_eq!(document.paragraphs.len(), count);
+                    std::hint::black_box(document);
+                }
+                repeated_times.push(start.elapsed().as_micros());
+                let start = std::time::Instant::now();
+                let document = ValidatedPackage::open(&bytes, &limits)
+                    .unwrap()
+                    .read_document()
+                    .unwrap();
+                for _ in 0..3 {
+                    std::hint::black_box(&document);
+                }
+                shared_times.push(start.elapsed().as_micros());
+            }
+            repeated_times.sort_unstable();
+            shared_times.sort_unstable();
+            println!(
+                "DOCX_PARSE_BENCH paragraphs={count} archive_bytes={} repeated_us={} shared_us={}",
+                bytes.len(),
+                repeated_times[1],
+                shared_times[1]
+            );
+        }
+    }
 
     const DOCUMENT: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">

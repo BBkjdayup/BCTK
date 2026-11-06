@@ -5,6 +5,7 @@ import { Delete, EditPen, MoreFilled, Plus } from '@element-plus/icons-vue'
 import Sortable from 'sortablejs'
 import { useAppStore } from '../stores/app'
 import { errorMessage } from '../services/errors'
+import { askForName, normalizeName } from '../utils/taxonomyNamePrompt'
 import type { Chapter, Subject } from '../types/domain'
 import { buildTaxonomyOrderItems } from '../utils/taxonomyOrder'
 
@@ -36,10 +37,6 @@ watch(
   { immediate: true },
 )
 
-function normalizeName(value: string) {
-  return value.trim().normalize('NFKC').toLocaleLowerCase('zh-CN')
-}
-
 function subjectNameExists(name: string, exceptId?: string) {
   const key = normalizeName(name)
   return appStore.subjects.some(
@@ -52,25 +49,6 @@ function chapterNameExists(subject: Subject, name: string, exceptId?: string) {
   return subject.chapters.some(
     (chapter) => chapter.id !== exceptId && normalizeName(chapter.name) === key,
   )
-}
-
-async function askForName(title: string, initialValue = '', maximum = 100): Promise<string | null> {
-  try {
-    const result = await ElMessageBox.prompt('名称将显示在题库筛选和题目录入页面中。', title, {
-      inputValue: initialValue,
-      inputPlaceholder: '请输入名称',
-      confirmButtonText: '保存',
-      cancelButtonText: '取消',
-      inputValidator: (value: string) => {
-        const name = value.trim().normalize('NFKC').trim()
-        if (!name) return '名称不能为空'
-        return [...name].length <= maximum || `名称不能超过 ${maximum} 个字符`
-      },
-    })
-    return result.value.trim().normalize('NFKC').trim()
-  } catch {
-    return null
-  }
 }
 
 async function addSubject() {

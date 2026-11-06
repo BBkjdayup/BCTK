@@ -59,7 +59,10 @@ onMounted(() => { void hydrateContent() })
   line-height: 1;
   vertical-align: -0.12em;
 }
-.rich-content-view :deep(table) { width: 100%; border-collapse: collapse; }
+.rich-content-view { overflow-x: auto; }
+.rich-content-view :deep(table) { width: 100%; max-width: 100%; border-collapse: collapse; table-layout: fixed; }
 .rich-content-view :deep(td),
-.rich-content-view :deep(th) { padding: 5px 7px; border: 1px solid #cbd5e1; }
+.rich-content-view :deep(th) { padding: 5px 7px; border: 1px solid #cbd5e1; vertical-align: top; overflow-wrap: anywhere; }
+.rich-content-view :deep(td p:last-child),
+.rich-content-view :deep(th p:last-child) { margin-bottom: 0; }
 </style>

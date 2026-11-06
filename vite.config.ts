@@ -3,12 +3,26 @@ import vue from "@vitejs/plugin-vue";
 import Components from "unplugin-vue-components/vite";
 import { ElementPlusResolver } from "unplugin-vue-components/resolvers";
 import packageInfo from "./package.json";
+import type { Plugin } from "vite";
+
+function rejectPreviewBackend(): Plugin {
+  return {
+    name: "desktop-excludes-preview-backend",
+    generateBundle(_options, bundle) {
+      for (const entry of Object.values(bundle)) {
+        if (entry.type === "chunk" && Object.keys(entry.modules).some((id) => id.replaceAll("\\", "/").endsWith("/src/services/mockBackend.ts"))) {
+          this.error("Desktop builds must not include the browser preview backend.");
+        }
+      }
+    },
+  };
+}
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async ({ command, mode }) => ({
   plugins: [
     vue(),
     Components({
@@ -18,9 +32,11 @@ export default defineConfig(async () => ({
         directives: true,
       })],
     }),
+    ...(command === "build" && mode !== "browser" ? [rejectPreviewBackend()] : []),
   ],
   define: {
     __APP_VERSION__: JSON.stringify(packageInfo.version),
+    __BROWSER_PREVIEW__: JSON.stringify(command === "serve" || mode === "browser"),
   },
   test: {
     environment: "jsdom",

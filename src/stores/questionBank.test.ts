@@ -89,7 +89,7 @@ describe('question bank filter isolation', () => {
     const oldRequest = new Promise<PageResult<Question>>((resolve) => {
       finishOldRequest = resolve
     })
-    vi.spyOn(backend, 'listQuestions')
+    vi.spyOn(backend, 'listQuestionSummaries')
       .mockImplementationOnce(() => oldRequest)
       .mockResolvedValueOnce({ items: [], total: 2, page: 1, pageSize: 20 })
 
@@ -113,7 +113,7 @@ describe('question bank filter isolation', () => {
     vi.spyOn(backend, 'batchEditQuestions').mockResolvedValue({ updatedCount: 1, questions: [] })
     vi.spyOn(backend, 'restoreQuestions').mockResolvedValue()
     vi.spyOn(backend, 'permanentlyDeleteQuestions').mockResolvedValue()
-    const listQuestions = vi.spyOn(backend, 'listQuestions')
+    const listQuestions = vi.spyOn(backend, 'listQuestionSummaries')
       .mockResolvedValue({ items: [], total: 1, page: 1, pageSize: 20 })
     const initialize = vi.spyOn(backend, 'initialize').mockResolvedValue(refreshedBootstrap)
 
@@ -138,7 +138,7 @@ describe('question bank filter isolation', () => {
     const store = useQuestionBankStore()
     const savedQuestion = { id: 'question-1' } as Question
     vi.spyOn(backend, 'saveQuestion').mockResolvedValue(savedQuestion)
-    vi.spyOn(backend, 'listQuestions')
+    vi.spyOn(backend, 'listQuestionSummaries')
       .mockResolvedValue({ items: [], total: 1, page: 1, pageSize: 20 })
     vi.spyOn(backend, 'initialize').mockRejectedValue(new Error('temporary failure'))
 
@@ -149,7 +149,7 @@ describe('question bank filter isolation', () => {
     const store = useQuestionBankStore()
     const failure = new Error('write failed')
     vi.spyOn(backend, 'saveQuestion').mockRejectedValue(failure)
-    const listQuestions = vi.spyOn(backend, 'listQuestions')
+    const listQuestions = vi.spyOn(backend, 'listQuestionSummaries')
     const initialize = vi.spyOn(backend, 'initialize')
 
     await expect(store.save({} as QuestionDraft)).rejects.toBe(failure)

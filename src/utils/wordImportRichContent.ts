@@ -6,6 +6,7 @@ import type {
 } from '../types/domain'
 import type { WordAnalysisLine, WordAnalysisTable } from './wordImportRecognition'
 import { splitWordImportFormulaSegments, wordImportFormulaPlainText } from './wordImportFormula'
+import { fitTableColumns, tablePixelSize } from './tableGeometry'
 
 const escapeHtml = (text: string) => text.replace(/[&<>"']/g, (character) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -36,16 +37,27 @@ function analysisTableHtml(
   table: WordAnalysisTable,
   formulasByNodeId: ReadonlyMap<string, DocxFormulaOccurrence>,
 ) {
-  const rows = table.rows.map((row) => {
-    const cells = row.map((cell) => {
+  const width = tablePixelSize(table.widthPx)
+  const sourceWidths = (table.columnWidthsPx ?? []).map(tablePixelSize)
+  const widths = width && sourceWidths.length && sourceWidths.every((value): value is number => value !== null)
+    ? fitTableColumns(sourceWidths, width)
+    : sourceWidths
+  const rows = table.rows.map((row, rowIndex) => {
+    const cells = row.map((cell, columnIndex) => {
       const content = cell.lines
         .map((line) => analysisLineHtml(line, formulasByNodeId))
         .join('')
-      return `<td>${content || '<p><br></p>'}</td>`
+      const columnWidth = widths[columnIndex]
+      return `<td${columnWidth ? ` colwidth="${columnWidth}"` : ''}>${content || '<p><br></p>'}</td>`
     }).join('')
-    return `<tr>${cells}</tr>`
+    const height = tablePixelSize(table.rowMinHeightsPx?.[rowIndex])
+    return `<tr${height ? ` data-row-min-height="${height}" style="height: ${height}px"` : ''}>${cells}</tr>`
   }).join('')
-  return `<table><tbody>${rows}</tbody></table>`
+  const columns = widths.length && widths.every(Boolean)
+    ? `<colgroup>${widths.map((columnWidth) => `<col width="${columnWidth}" style="width: ${columnWidth}px">`).join('')}</colgroup>`
+    : ''
+  const dimensions = width ? ` data-table-width="${width}" style="width: ${width}px; max-width: 100%; table-layout: fixed"` : ''
+  return `<table${dimensions}>${columns}<tbody>${rows}</tbody></table>`
 }
 
 function analysisLineHtml(

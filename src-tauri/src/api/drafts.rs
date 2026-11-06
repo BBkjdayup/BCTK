@@ -1,3 +1,7 @@
+use super::rich_validation::rich_content_bytes;
+#[cfg(test)]
+use super::rich_validation::{MAX_RICH_DOCUMENT_BYTES, MAX_RICH_HTML_BYTES};
+use super::rich_validation::{RichContentPolicy, contains_reserved_separator};
 use std::{collections::HashSet, path::Path};
 
 use sqlx::{FromRow, SqlitePool};
@@ -31,10 +35,6 @@ const FREE_DOCUMENT_DRAFT_SCHEMA_VERSION: u32 = 3;
 
 // Keep autosave at least as defensive as the final question write path while
 // still allowing an unfinished question to be recovered.
-const MAX_RICH_HTML_BYTES: usize = 2 * 1024 * 1024;
-const MAX_RICH_DOCUMENT_BYTES: usize = 4 * 1024 * 1024;
-const MAX_RICH_PLAIN_BYTES: usize = 512 * 1024;
-const MAX_SOURCE_OOXML_BYTES: usize = 4 * 1024 * 1024;
 const MAX_TOTAL_CONTENT_BYTES: usize = 12 * 1024 * 1024;
 const MAX_DRAFT_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 const MAX_WORD_IMPORT_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
@@ -127,27 +127,6 @@ pub(crate) async fn get_question_draft(
     .map_err(CommandError::database)?;
 
     row.map(record_from_row).transpose()
-}
-
-/// Lists only question-editor autosaves. Word-import preview drafts remain an
-/// independent workflow and are deliberately not exposed here.
-pub(crate) async fn list_question_drafts(
-    pool: &SqlitePool,
-) -> CommandResult<Vec<QuestionDraftRecordApi>> {
-    let rows = sqlx::query_as::<_, DraftRow>(
-        "SELECT d.id, d.draft_key, d.draft_kind, d.target_question_id, \
-                d.base_content_version, d.payload_schema_version, d.payload_json, \
-                d.autosaved_at_ms, d.created_at_ms, d.updated_at_ms, \
-                q.content_version AS current_content_version \
-         FROM drafts d LEFT JOIN questions q ON q.id = d.target_question_id \
-         WHERE d.draft_kind IN ('question_create', 'question_edit') \
-         ORDER BY d.autosaved_at_ms DESC, d.id",
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(CommandError::database)?;
-
-    rows.into_iter().map(record_from_row).collect()
 }
 
 /// Transactionally inserts or replaces the one autosave slot for the editor.
@@ -1205,12 +1184,6 @@ fn exceeds_char_limit(value: &str, max_chars: usize) -> bool {
     value.len() > max_chars.saturating_mul(4) || value.chars().count() > max_chars
 }
 
-fn contains_reserved_separator(value: &str) -> bool {
-    value
-        .chars()
-        .any(|character| matches!(character, '\u{1e}' | '\u{1f}'))
-}
-
 fn contains_disallowed_text_control(value: &str) -> bool {
     value
         .chars()
@@ -1227,19 +1200,6 @@ fn serialize_word_import_payload(payload: &WordImportDraftPayloadApi) -> Command
         ));
     }
     Ok(serialized)
-}
-
-/// Count helper for badges that specifically describe question-editor work.
-/// The existing bootstrap-wide `COUNT(*)` may remain broader when its label
-/// means all pending workflows.
-#[allow(dead_code)]
-pub(crate) async fn pending_question_draft_count(pool: &SqlitePool) -> CommandResult<i64> {
-    sqlx::query_scalar(
-        "SELECT COUNT(*) FROM drafts WHERE draft_kind IN ('question_create', 'question_edit')",
-    )
-    .fetch_one(pool)
-    .await
-    .map_err(CommandError::database)
 }
 
 fn draft_identity(question_id: Option<&str>) -> CommandResult<DraftIdentity> {
@@ -1492,166 +1452,12 @@ fn validate_rich_content_with_field_limits(
     content: &RichContentApi,
     enforce_field_limits: bool,
 ) -> CommandResult<()> {
-    validate_rich_document(label, content, enforce_field_limits)?;
-    if enforce_field_limits && content.html.len() > MAX_RICH_HTML_BYTES {
-        return Err(CommandError::validation(format!(
-            "{label}的富文本超过 {} MB 的安全上限。",
-            MAX_RICH_HTML_BYTES / 1024 / 1024
-        )));
-    }
-    if enforce_field_limits && content.plain_text.len() > MAX_RICH_PLAIN_BYTES {
-        return Err(CommandError::validation(format!(
-            "{label}的可搜索文字过长。"
-        )));
-    }
-    if enforce_field_limits
-        && content
-            .source_ooxml
-            .as_ref()
-            .is_some_and(|xml| xml.len() > MAX_SOURCE_OOXML_BYTES)
-    {
-        return Err(CommandError::validation(format!(
-            "{label}保留的 Word 原始内容超过安全上限。"
-        )));
-    }
-    if contains_reserved_separator(&content.html)
-        || contains_reserved_separator(&content.plain_text)
-        || content
-            .source_ooxml
-            .as_ref()
-            .is_some_and(|xml| contains_reserved_separator(xml))
-    {
-        return Err(CommandError::validation(format!(
-            "{label}包含软件保留的控制分隔符，请删除后重试。"
-        )));
-    }
-
-    let normalized_html = content
-        .html
-        .to_ascii_lowercase()
-        .split_ascii_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let forbidden = [
-        "<script",
-        "<iframe",
-        "<object",
-        "<embed",
-        "<link",
-        "<meta",
-        "<base",
-        "javascript:",
-        "data:text/html",
-        "srcdoc=",
-    ];
-    if forbidden
-        .iter()
-        .any(|pattern| normalized_html.contains(pattern))
-        || contains_inline_event_handler(&normalized_html)
-    {
-        return Err(CommandError::new(
-            "UNSAFE_RICH_CONTENT",
-            format!("{label}中包含不安全的网页代码，已停止自动保存。"),
-        ));
-    }
-    Ok(())
-}
-
-fn contains_inline_event_handler(html: &str) -> bool {
-    let bytes = html.as_bytes();
-    let mut index = 0usize;
-    while index + 3 < bytes.len() {
-        if bytes[index] == b' ' && bytes[index + 1] == b'o' && bytes[index + 2] == b'n' {
-            let mut cursor = index + 3;
-            while cursor < bytes.len() && bytes[cursor].is_ascii_alphabetic() {
-                cursor += 1;
-            }
-            while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
-                cursor += 1;
-            }
-            if cursor > index + 3 && bytes.get(cursor) == Some(&b'=') {
-                return true;
-            }
-        }
-        index += 1;
-    }
-    false
-}
-
-fn validate_rich_document(
-    label: &str,
-    content: &RichContentApi,
-    enforce_document_limit: bool,
-) -> CommandResult<()> {
-    match content.schema_version {
-        1 => {
-            if content.editor.is_some()
-                || content.editor_version.is_some()
-                || content.document.is_some()
-            {
-                return Err(CommandError::validation(format!(
-                    "{label}的旧内容版本不能携带编辑器 JSON。"
-                )));
-            }
-        }
-        2 => {
-            if content.editor.as_deref() != Some("tiptap") {
-                return Err(CommandError::validation(format!(
-                    "{label}的编辑器类型不受支持。"
-                )));
-            }
-            let version = content.editor_version.as_deref().unwrap_or_default().trim();
-            if version.is_empty() || version.chars().count() > 64 {
-                return Err(CommandError::validation(format!(
-                    "{label}的编辑器版本无效。"
-                )));
-            }
-            let document = content.document.as_ref().ok_or_else(|| {
-                CommandError::validation(format!("{label}缺少 Tiptap 文档 JSON。"))
-            })?;
-            if document.get("type").and_then(serde_json::Value::as_str) != Some("doc") {
-                return Err(CommandError::validation(format!(
-                    "{label}的 Tiptap 文档根节点无效。"
-                )));
-            }
-            if enforce_document_limit
-                && serde_json::to_vec(document)
-                    .map_err(CommandError::database)?
-                    .len()
-                    > MAX_RICH_DOCUMENT_BYTES
-            {
-                return Err(CommandError::validation(format!(
-                    "{label}的 Tiptap 文档 JSON 超过安全上限。"
-                )));
-            }
-        }
-        _ => {
-            return Err(CommandError::validation(format!(
-                "{label}使用了当前软件不支持的内容版本。"
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn rich_content_bytes(content: &RichContentApi) -> usize {
-    content
-        .html
-        .len()
-        .saturating_add(content.plain_text.len())
-        .saturating_add(
-            content
-                .source_ooxml
-                .as_ref()
-                .map_or(0, std::string::String::len),
-        )
-        .saturating_add(
-            content
-                .document
-                .as_ref()
-                .and_then(|document| serde_json::to_vec(document).ok())
-                .map_or(0, |document| document.len()),
-        )
+    let policy = if enforce_field_limits {
+        RichContentPolicy::DraftField
+    } else {
+        RichContentPolicy::DraftDocument
+    };
+    super::rich_validation::validate_rich_content(label, content, policy)
 }
 
 fn serialize_payload(payload: &QuestionDraftApi) -> CommandResult<String> {
@@ -1958,14 +1764,6 @@ mod tests {
         assert!(stale_from_versions("question_edit", Some(3), Some(4)));
         assert!(stale_from_versions("question_edit", Some(3), None));
         assert!(!stale_from_versions("question_create", None, None));
-    }
-
-    #[test]
-    fn inline_event_handler_detection_matches_question_write_safety_rule() {
-        assert!(contains_inline_event_handler(
-            "<img src=x onerror =alert(1)>"
-        ));
-        assert!(!contains_inline_event_handler("<strong>on call</strong>"));
     }
 
     #[test]

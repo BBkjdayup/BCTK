@@ -127,6 +127,15 @@ function thirdPaperLines() {
 }
 
 describe('Word question boundaries around option letters', () => {
+  it('preserves Latin option contents and answer positions after ideographic commas', () => {
+    const builder = lineBuilder()
+    for (const text of ['一、单项选择题', '1. 请选择正确项', 'A、DNA', 'B、Apple', 'C、B 型血', 'D、RNA', '答案：A']) builder.add(text)
+    const [question] = recognizeWordQuestions(builder.lines)
+    expect(question?.options.map((option) => option.map((line) => line.text).join(''))).toEqual(['DNA', 'Apple', 'B 型血', 'RNA'])
+    expect(question?.stemLines.map((line) => line.text)).toEqual(['请选择正确项'])
+    expect(question?.answerLines.map((line) => line.text)).toEqual(['A'])
+  })
+
   it('keeps A/B/C references in a choice stem before the real options', () => {
     const builder = lineBuilder()
     builder.add('一、选择题（共1题）')

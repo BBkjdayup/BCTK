@@ -70,3 +70,6 @@ test-results/
 *.njsproj
 *.sln
 *.sw?
+
+# Optional browser demonstration build
+dist-preview

@@ -1,11 +1,7 @@
-use std::io::{Read, Seek, SeekFrom};
-
 use quick_xml::{events::Event, reader::NsReader};
-use zip::ZipArchive;
 
 use super::{
     ByteSpan, Diagnostic, DocxError, DocxLimits, DocxResult,
-    package::{archive_size_diagnostic, inspect_archive_with_size, read_part_limited},
     xml::{NamespaceKind, attribute_value, classify_namespace, decode_reference, local_name},
 };
 
@@ -63,6 +59,9 @@ pub struct DocumentTableCell {
 pub struct DocumentTable {
     pub index: usize,
     pub rows: Vec<Vec<DocumentTableCell>>,
+    pub width_px: Option<u32>,
+    pub column_widths_px: Vec<u32>,
+    pub row_min_heights_px: Vec<Option<u32>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -97,34 +96,12 @@ struct MathCapture {
     text_char_offset: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct TableBuilder {
     rows: Vec<Vec<DocumentTableCell>>,
-}
-
-/// Validates the OPC package, reads `word/document.xml` with a bound, and then
-/// extracts its narrow logical representation.
-pub fn read_document_from_docx<R: Read + Seek>(
-    mut source: R,
-    limits: &DocxLimits,
-) -> DocxResult<ParsedDocument> {
-    let archive_bytes = source.seek(SeekFrom::End(0))?;
-    if let Some(diagnostic) = archive_size_diagnostic(archive_bytes, limits) {
-        return Err(DocxError::rejected(vec![diagnostic]));
-    }
-    source.seek(SeekFrom::Start(0))?;
-    let mut archive = ZipArchive::new(source)?;
-    let inspection = inspect_archive_with_size(&mut archive, Some(archive_bytes), limits)?;
-    inspection.ensure_acceptable()?;
-    let xml = read_part_limited(&mut archive, DOCUMENT_PART, limits.max_xml_part_bytes)?;
-    let mut document = parse_document_xml(&xml, limits)?;
-    document.diagnostics.extend(
-        inspection
-            .diagnostics
-            .into_iter()
-            .filter(|diagnostic| diagnostic.severity != super::DiagnosticSeverity::Error),
-    );
-    Ok(document)
+    width_px: Option<u32>,
+    column_widths_px: Vec<u32>,
+    row_min_heights_px: Vec<Option<u32>>,
 }
 
 /// Reads paragraph logical text while preserving each outermost OMML subtree as
@@ -247,11 +224,14 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                         b"tbl" => {
                             table_depth += 1;
                             if table_depth == 1 {
-                                table = Some(TableBuilder { rows: Vec::new() });
+                                table = Some(TableBuilder::default());
                             }
                         }
                         b"tr" if table_depth == 1 => {
                             table_row = Some(Vec::new());
+                            if let Some(table) = table.as_mut() {
+                                table.row_min_heights_px.push(None);
+                            }
                         }
                         b"tc" if table_depth == 1 => {
                             table_cell = Some(DocumentTableCell::default());
@@ -284,6 +264,9 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                         }
                         _ => {}
                     }
+                    if table_depth == 1 {
+                        capture_table_geometry(&reader, start, &local, table.as_mut())?;
+                    }
                 }
             }
             Event::Empty(ref start) => {
@@ -299,6 +282,9 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                 if math_capture.is_some() {
                     buffer.clear();
                     continue;
+                }
+                if namespace == NamespaceKind::Word && table_depth == 1 {
+                    capture_table_geometry(&reader, start, &local, table.as_mut())?;
                 }
                 if namespace == NamespaceKind::Math && (local == b"oMath" || local == b"oMathPara")
                 {
@@ -528,6 +514,9 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
                                 result.tables.push(DocumentTable {
                                     index: result.tables.len(),
                                     rows: table.rows,
+                                    width_px: table.width_px,
+                                    column_widths_px: table.column_widths_px,
+                                    row_min_heights_px: table.row_min_heights_px,
                                 });
                             }
                             table_depth = table_depth.saturating_sub(1);
@@ -616,6 +605,51 @@ pub fn parse_document_xml(xml: &[u8], limits: &DocxLimits) -> DocxResult<ParsedD
         ));
     }
     Ok(result)
+}
+
+fn capture_table_geometry(
+    reader: &NsReader<&[u8]>,
+    start: &quick_xml::events::BytesStart<'_>,
+    local: &[u8],
+    table: Option<&mut TableBuilder>,
+) -> DocxResult<()> {
+    let Some(table) = table else {
+        return Ok(());
+    };
+    if !matches!(local, b"tblW" | b"gridCol" | b"trHeight") {
+        return Ok(());
+    }
+    let attribute = |name: &[u8]| {
+        attribute_value(
+            reader,
+            start,
+            name,
+            Some(NamespaceKind::Word),
+            DOCUMENT_PART,
+        )
+    };
+    if local == b"tblW" && attribute(b"type")?.as_deref() != Some("dxa") {
+        return Ok(());
+    }
+    let value = attribute(if local == b"trHeight" { b"val" } else { b"w" })?
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|value| (1..=150_000).contains(value))
+        .map(|value| ((value + 7) / 15).max(1));
+    match local {
+        b"tblW" => table.width_px = value,
+        b"gridCol" if table.column_widths_px.len() < 256 => {
+            if let Some(value) = value {
+                table.column_widths_px.push(value);
+            }
+        }
+        b"trHeight" => {
+            if let Some(height) = table.row_min_heights_px.last_mut() {
+                *height = value;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn word_script_kind(
@@ -855,5 +889,23 @@ mod tests {
             ]
         );
         assert_eq!(parsed.paragraphs[7].logical_text, "after");
+    }
+
+    #[test]
+    fn imports_table_grid_width_and_row_minimum_in_pixels() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:tbl><w:tblPr><w:tblW w:type="dxa" w:w="8325"/></w:tblPr><w:tblGrid><w:gridCol w:w="1385"/><w:gridCol w:w="1388"/></w:tblGrid>
+<w:tr><w:trPr><w:trHeight w:val="600" w:hRule="exact"/></w:trPr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr>
+<w:tr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>
+<w:tbl><w:tblPr><w:tblW w:type="pct" w:w="5000"/></w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl>
+</w:body></w:document>"#;
+        let parsed = parse_document_xml(xml, &DocxLimits::default()).unwrap();
+        assert_eq!(parsed.tables[0].width_px, Some(555));
+        assert_eq!(parsed.tables[0].column_widths_px, [92, 93]);
+        assert_eq!(parsed.tables[0].row_min_heights_px, [Some(40), None]);
+        assert_eq!(
+            parsed.tables[1].width_px, None,
+            "percentage widths are not pixels"
+        );
     }
 }

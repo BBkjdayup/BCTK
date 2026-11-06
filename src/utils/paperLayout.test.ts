@@ -173,6 +173,16 @@ describe('paper layout adapter', () => {
     }))
   })
 
+  it('fits saved column proportions to a paper page without reducing row minimum heights', () => {
+    const elements = richContentToCanvasElements({ schemaVersion: 1, plainText: 'A B', html:
+      '<table data-table-width="1200"><colgroup><col style="width: 400px"><col style="width: 800px"></colgroup><tr data-row-min-height="80"><td><p>A</p></td><td><p>B</p></td></tr></table>' })
+    const table = elements.find((element) => element.type === 'table')!
+    const widths = table.colgroup!.map((column) => column.width)
+    expect(widths.reduce((a, b) => a + b)).toBe(650)
+    expect(Math.abs(widths[1]! - 2 * widths[0]!)).toBeLessThanOrEqual(2)
+    expect(table.trList?.[0]).toMatchObject({ height: 80, minHeight: 80 })
+  })
+
   it('collects managed image identifiers from paper rich content without duplicates', () => {
     const source = paper()
     const resourceId = '019fa7fc-2c03-7111-a8b6-4166afe943bc'

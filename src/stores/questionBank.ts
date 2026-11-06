@@ -5,6 +5,7 @@ import { errorMessage } from '../services/errors'
 import { useAppStore } from './app'
 import type {
   Question,
+  QuestionSummary,
   QuestionBatchEditRequest,
   QuestionDraft,
   QuestionFilters,
@@ -45,7 +46,7 @@ function filterSignature(filters: QuestionFilters) {
 export const useQuestionBankStore = defineStore('questionBank', () => {
   const appStore = useAppStore()
   const filters = reactive<QuestionFilters>(createQuestionFilters())
-  const questions = ref<Question[]>([])
+  const questions = ref<QuestionSummary[]>([])
   const total = ref(0)
   const loading = ref(false)
   const selectedIds = ref<string[]>([])
@@ -62,7 +63,7 @@ export const useQuestionBankStore = defineStore('questionBank', () => {
     loading.value = true
     error.value = null
     try {
-      const page = await backend.listQuestions(requestedFilters)
+      const page = await backend.listQuestionSummaries(requestedFilters)
       if (requestSequence !== loadSequence || requestedSignature !== filterSignature(filters)) return
       questions.value = page.items
       total.value = page.total

@@ -6,7 +6,7 @@ use ego_tree::NodeRef;
 use scraper::{Html, Node};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::SqliteConnection;
+use sqlx::{Connection, SqliteConnection};
 use unicode_normalization::UnicodeNormalization;
 
 use super::models::{
@@ -387,71 +387,255 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+const REBUILD_BATCH_SIZE: i64 = 64;
+type PendingQuestion = (String, String, String, String, String, String, String);
+const PENDING_BATCH_SQL: &str = "SELECT id, question_type, subject_id, chapter_id, stem_json, answer_json, explanation_json \
+     FROM questions WHERE id > ? AND fingerprint_version <> 2 ORDER BY id LIMIT ?";
+
 /// Rebuild derived fields without changing business JSON, question versions,
-/// timestamps or paper snapshots. During a schema upgrade this runs on the
-/// validated candidate database, before the original file is replaced.
+/// timestamps or paper snapshots. Each bounded batch commits atomically; a
+/// retry skips committed rows and never rescans their prefix for every item.
+#[cfg(test)]
 pub async fn rebuild_pending(
     connection: &mut SqliteConnection,
     only_id: Option<&str>,
 ) -> CommandResult<usize> {
+    rebuild_pending_with_progress(connection, only_id, |_, _| {}).await
+}
+
+pub async fn rebuild_pending_with_progress(
+    connection: &mut SqliteConnection,
+    only_id: Option<&str>,
+    mut progress: impl FnMut(usize, usize),
+) -> CommandResult<usize> {
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM questions WHERE fingerprint_version <> 2 AND (? IS NULL OR id = ?)",
+    )
+    .bind(only_id)
+    .bind(only_id)
+    .fetch_one(&mut *connection)
+    .await
+    .map_err(CommandError::database)?;
+    let total = usize::try_from(total).map_err(CommandError::database)?;
     let mut rebuilt = 0;
+    let mut last_id = String::new();
+    progress(0, total);
     loop {
-        let row = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
-            "SELECT id, question_type, subject_id, chapter_id, stem_json, answer_json, explanation_json \
-             FROM questions WHERE fingerprint_version <> 2 AND (? IS NULL OR id = ?) ORDER BY id LIMIT 1"
-        ).bind(only_id).bind(only_id).fetch_optional(&mut *connection).await.map_err(CommandError::database)?;
-        let Some((id, question_type, subject_id, chapter_id, stem, answer, explanation)) = row
-        else {
+        let mut transaction = connection.begin().await.map_err(CommandError::database)?;
+        let batch_result = async {
+            let rows = if let Some(id) = only_id {
+                sqlx::query_as::<_, PendingQuestion>(
+                    "SELECT id, question_type, subject_id, chapter_id, stem_json, answer_json, explanation_json \
+                     FROM questions WHERE id = ? AND fingerprint_version <> 2"
+                ).bind(id).fetch_all(&mut *transaction).await
+            } else {
+                sqlx::query_as::<_, PendingQuestion>(PENDING_BATCH_SQL)
+                    .bind(&last_id).bind(REBUILD_BATCH_SIZE).fetch_all(&mut *transaction).await
+            }.map_err(CommandError::database)?;
+            let count = rows.len();
+            let next_id = rows.last().map(|row| row.0.clone());
+            for row in rows {
+                rebuild_one(&mut transaction, row).await?;
+            }
+            Ok::<_, super::models::CommandError>((count, next_id))
+        }.await;
+        let (count, next_id) = match batch_result {
+            Ok(batch) => batch,
+            Err(error) => {
+                // Finish rollback before the migration layer closes/removes
+                // its candidate. Do not leave Windows cleanup racing SQLite.
+                let _ = transaction.rollback().await;
+                return Err(error);
+            }
+        };
+        transaction.commit().await.map_err(CommandError::database)?;
+        let Some(next_id) = next_id else {
             break;
         };
-        let rows = sqlx::query_as::<_, (String, i64, String)>(
-            "SELECT id, position, content_json FROM question_options WHERE question_id = ? ORDER BY position"
-        ).bind(&id).fetch_all(&mut *connection).await.map_err(CommandError::database)?;
-        let mut options = Vec::with_capacity(rows.len());
-        for (option_id, position, json) in rows {
-            options.push(QuestionOptionApi {
-                id: option_id,
-                position: u32::try_from(position).map_err(CommandError::database)?,
-                content: serde_json::from_str(&json).map_err(CommandError::database)?,
-            });
+        last_id = next_id;
+        rebuilt += count;
+        progress(rebuilt, total);
+        if only_id.is_some() {
+            break;
         }
-        let draft = normalize_search_fields(&QuestionDraftApi {
-            answer_review_required: false,
-            id: None,
-            question_id: Some(id.clone()),
-            question_type,
-            subject_id,
-            chapter_id,
-            stem: serde_json::from_str(&stem).map_err(CommandError::database)?,
-            answer: serde_json::from_str(&answer).map_err(CommandError::database)?,
-            explanation: serde_json::from_str(&explanation).map_err(CommandError::database)?,
-            options,
-            tag_ids: Vec::new(),
-            resource_refs: Vec::new(),
-            base_content_version: None,
-        });
-        let hashes = resource_hashes(connection, &[&draft]).await?;
-        let fingerprint = fingerprint(&draft, &hashes);
-        let options_plain = draft
-            .options
-            .iter()
-            .map(|o| o.content.plain_text.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        sqlx::query("UPDATE questions SET fingerprint_version = 2, fingerprint_comparable = ?, exact_fingerprint = ?, stem_plain = ?, \
-            options_plain = ?, answer_plain = ?, explanation_plain = ? WHERE id = ?")
-            .bind(comparable(&draft, &hashes)).bind(fingerprint).bind(&draft.stem.plain_text).bind(options_plain)
-            .bind(&draft.answer.plain_text).bind(&draft.explanation.plain_text).bind(&id)
-            .execute(&mut *connection).await.map_err(CommandError::database)?;
-        for option in &draft.options {
-            sqlx::query("UPDATE question_options SET plain_text = ? WHERE id = ?")
-                .bind(&option.content.plain_text)
-                .bind(&option.id)
-                .execute(&mut *connection)
-                .await
-                .map_err(CommandError::database)?;
-        }
-        rebuilt += 1;
     }
     Ok(rebuilt)
+}
+
+async fn rebuild_one(connection: &mut SqliteConnection, row: PendingQuestion) -> CommandResult<()> {
+    let (id, question_type, subject_id, chapter_id, stem, answer, explanation) = row;
+    let rows = sqlx::query_as::<_, (String, i64, String)>(
+        "SELECT id, position, content_json FROM question_options WHERE question_id = ? ORDER BY position"
+    ).bind(&id).fetch_all(&mut *connection).await.map_err(CommandError::database)?;
+    let mut options = Vec::with_capacity(rows.len());
+    for (option_id, position, json) in rows {
+        options.push(QuestionOptionApi {
+            id: option_id,
+            position: u32::try_from(position).map_err(CommandError::database)?,
+            content: serde_json::from_str(&json).map_err(CommandError::database)?,
+        });
+    }
+    let draft = normalize_search_fields(&QuestionDraftApi {
+        answer_review_required: false,
+        id: None,
+        question_id: Some(id.clone()),
+        question_type,
+        subject_id,
+        chapter_id,
+        stem: serde_json::from_str(&stem).map_err(CommandError::database)?,
+        answer: serde_json::from_str(&answer).map_err(CommandError::database)?,
+        explanation: serde_json::from_str(&explanation).map_err(CommandError::database)?,
+        options,
+        tag_ids: Vec::new(),
+        resource_refs: Vec::new(),
+        base_content_version: None,
+    });
+    let hashes = resource_hashes(connection, &[&draft]).await?;
+    let fingerprint = fingerprint(&draft, &hashes);
+    let options_plain = draft
+        .options
+        .iter()
+        .map(|o| o.content.plain_text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    sqlx::query("UPDATE questions SET fingerprint_version = 2, fingerprint_comparable = ?, exact_fingerprint = ?, stem_plain = ?, \
+        options_plain = ?, answer_plain = ?, explanation_plain = ? WHERE id = ?")
+        .bind(comparable(&draft, &hashes)).bind(fingerprint).bind(&draft.stem.plain_text).bind(options_plain)
+        .bind(&draft.answer.plain_text).bind(&draft.explanation.plain_text).bind(&id)
+        .execute(&mut *connection).await.map_err(CommandError::database)?;
+    for option in &draft.options {
+        sqlx::query("UPDATE question_options SET plain_text = ? WHERE id = ?")
+            .bind(&option.content.plain_text)
+            .bind(&option.id)
+            .execute(&mut *connection)
+            .await
+            .map_err(CommandError::database)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod startup_rebuild_tests {
+    use super::*;
+
+    fn id(index: usize) -> String {
+        format!("00000000-0000-7000-8000-{index:012}")
+    }
+
+    async fn fixture(count: usize) -> SqliteConnection {
+        let mut connection = SqliteConnection::connect("sqlite::memory:").await.unwrap();
+        sqlx::migrate!("./migrations")
+            .run_direct(&mut connection)
+            .await
+            .unwrap();
+        let mut transaction = connection.begin().await.unwrap();
+        sqlx::query("INSERT INTO subjects (id, name, name_key, created_at_ms, updated_at_ms) VALUES (?, 'test', 'test', 1, 1)")
+            .bind(id(90000)).execute(&mut *transaction).await.unwrap();
+        sqlx::query("INSERT INTO chapters (id, subject_id, name, name_key, created_at_ms, updated_at_ms) VALUES (?, ?, 'test', 'test', 1, 1)")
+            .bind(id(90001)).bind(id(90000)).execute(&mut *transaction).await.unwrap();
+        let rich = serde_json::json!({"schemaVersion":1,"html":"<p>x<sup>2</sup></p>","plainText":"stale"}).to_string();
+        for index in 0..count {
+            sqlx::query("INSERT INTO questions (id, question_type, subject_id, chapter_id, stem_json, answer_json, explanation_json, stem_plain, answer_plain, exact_fingerprint, content_version, created_at_ms, updated_at_ms, deleted_at_ms) VALUES (?, 'short_answer', ?, ?, ?, ?, ?, 'stale', 'stale', zeroblob(32), 4, 1, 7, ?)")
+                .bind(id(index)).bind(id(90000)).bind(id(90001)).bind(&rich).bind(&rich).bind(&rich)
+                .bind(if index % 7 == 0 { Some(9_i64) } else { None })
+                .execute(&mut *transaction).await.unwrap();
+            sqlx::query("INSERT INTO question_options (id, question_id, position, content_json, plain_text, created_at_ms, updated_at_ms) VALUES (?, ?, 0, ?, 'stale', 1, 7)")
+                .bind(id(100000 + index)).bind(id(index)).bind(&rich).execute(&mut *transaction).await.unwrap();
+        }
+        transaction.commit().await.unwrap();
+        connection
+    }
+
+    #[tokio::test]
+    async fn failed_batch_rolls_back_options_and_questions_then_retry_completes_all_rows() {
+        let mut connection = fixture(150).await;
+        let original: String = sqlx::query_scalar("SELECT stem_json FROM questions WHERE id = ?")
+            .bind(id(100))
+            .fetch_one(&mut connection)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE questions SET stem_json = '{}' WHERE id = ?")
+            .bind(id(100))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        let mut events = Vec::new();
+        assert!(
+            rebuild_pending_with_progress(&mut connection, None, |done, total| events
+                .push((done, total)))
+            .await
+            .is_err()
+        );
+        assert_eq!(events, vec![(0, 150), (64, 150)]);
+        let rebuilt: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE fingerprint_version = 2")
+                .fetch_one(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(rebuilt, 64);
+        let uncommitted_options: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM question_options WHERE question_id >= ? AND plain_text <> 'stale'").bind(id(64)).fetch_one(&mut connection).await.unwrap();
+        assert_eq!(uncommitted_options, 0);
+        sqlx::query("UPDATE questions SET stem_json = ? WHERE id = ?")
+            .bind(&original)
+            .bind(id(100))
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        events.clear();
+        assert_eq!(
+            rebuild_pending_with_progress(&mut connection, None, |done, total| events
+                .push((done, total)))
+            .await
+            .unwrap(),
+            86
+        );
+        assert_eq!(events, vec![(0, 86), (64, 86), (86, 86)]);
+        let preserved: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE fingerprint_version = 2 AND stem_json = ? AND content_version = 4 AND updated_at_ms = 7 AND stem_plain = 'x2'").bind(&original).fetch_one(&mut connection).await.unwrap();
+        assert_eq!(preserved, 150);
+        let deleted: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM questions WHERE deleted_at_ms = 9 AND fingerprint_version = 2",
+        )
+        .fetch_one(&mut connection)
+        .await
+        .unwrap();
+        assert_eq!(deleted, 22);
+        assert_eq!(rebuild_pending(&mut connection, None).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn bounded_cursor_uses_index_seek_and_single_id_rebuild_is_scoped() {
+        use sqlx::Row;
+        let mut connection = fixture(150).await;
+        let plan = sqlx::query(&format!("EXPLAIN QUERY PLAN {PENDING_BATCH_SQL}"))
+            .bind(id(100))
+            .bind(REBUILD_BATCH_SIZE)
+            .fetch_all(&mut connection)
+            .await
+            .unwrap();
+        assert!(
+            plan.iter().any(|row| {
+                let detail: String = row.get("detail");
+                detail.contains("SEARCH questions") && detail.contains("id>?")
+            }),
+            "a batch must seek past its cursor rather than rescan the processed prefix"
+        );
+        assert_eq!(
+            rebuild_pending(&mut connection, Some(&id(99)))
+                .await
+                .unwrap(),
+            1
+        );
+        let upgraded: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM questions WHERE fingerprint_version = 2")
+                .fetch_all(&mut connection)
+                .await
+                .unwrap();
+        assert_eq!(upgraded, vec![id(99)]);
+        assert_eq!(
+            rebuild_pending(&mut connection, Some(&id(999)))
+                .await
+                .unwrap(),
+            0
+        );
+    }
 }

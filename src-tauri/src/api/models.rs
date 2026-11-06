@@ -160,6 +160,25 @@ pub struct QuestionApi {
     pub content_version: i64,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionSummaryApi {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub question_type: String,
+    pub stem: RichContentApi,
+    pub subject_id: String,
+    pub chapter_id: String,
+    pub subject_name: String,
+    pub chapter_name: String,
+    pub tags: Vec<TagApi>,
+    pub last_used_at: Option<i64>,
+    pub deleted_at: Option<i64>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub content_version: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionDraftApi {
@@ -562,6 +581,7 @@ pub struct QuestionBatchVersionApi {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QuestionBatchEditResultApi {
+    pub undo_id: Option<String>,
     pub updated_count: u32,
     pub questions: Vec<QuestionBatchVersionApi>,
 }
@@ -1120,6 +1140,9 @@ pub struct DocxTableCellApi {
 pub struct DocxTableOccurrenceApi {
     pub table_index: u32,
     pub rows: Vec<Vec<DocxTableCellApi>>,
+    pub width_px: Option<u32>,
+    pub column_widths_px: Vec<u32>,
+    pub row_min_heights_px: Vec<Option<u32>>,
 }
 
 #[derive(Clone, Debug, Serialize)]

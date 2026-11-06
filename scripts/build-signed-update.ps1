@@ -1,5 +1,6 @@
 param(
-    [string]$NotesFile = ""
+    [string]$NotesFile = "",
+    [string]$QualityReceipt = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,9 +14,41 @@ if ($version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
     throw "package.json 中的软件版本不是有效的 SemVer：$version"
 }
 
-$privateKeyPath = Join-Path $env:USERPROFILE ".tauri\tktiku-updater.key"
+$workspaceRoot = Split-Path -Parent $repoRoot
+$isTKupWorkspace = Test-Path -LiteralPath (Join-Path $workspaceRoot "TKup.code-workspace") -PathType Leaf
+$destinationDirectory = if ($isTKupWorkspace) {
+    Join-Path $workspaceRoot "releases\desktop\v$version\update"
+} else {
+    Join-Path $repoRoot ".codex-tmp\desktop-updates\$version"
+}
+if (Test-Path -LiteralPath $destinationDirectory) {
+    throw "这个版本已有本地签名更新包，不能覆盖。请使用新的版本号。"
+}
+
+$qualityScript = Join-Path $workspaceRoot 'tools/release/quality_gate.py'
+if (-not $isTKupWorkspace -or -not (Test-Path -LiteralPath $qualityScript -PathType Leaf)) {
+    throw '请在完整 TKup 工作区运行签名构建；缺少统一发布检查入口。'
+}
+$ownsQualityReceipt = [string]::IsNullOrWhiteSpace($QualityReceipt)
+if ($ownsQualityReceipt) {
+    $QualityReceipt = Join-Path ([IO.Path]::GetTempPath()) ("tk-signing-checks-" + [Guid]::NewGuid().ToString('N') + '.json')
+}
+try {
+if ($ownsQualityReceipt) {
+    & python $qualityScript run --scope desktop --receipt $QualityReceipt
+} else {
+    & python $qualityScript verify --scope desktop --receipt $QualityReceipt
+}
+if ($LASTEXITCODE -ne 0) { throw '发布检查未通过，已停止签名构建。' }
+
+$keyDirectory = if ($isTKupWorkspace) {
+    Join-Path $workspaceRoot "private\updater"
+} else {
+    Join-Path $env:USERPROFILE ".tauri"
+}
+$privateKeyPath = Join-Path $keyDirectory "tktiku-updater.key"
 $publicKeyPath = "$privateKeyPath.pub"
-$passwordPath = Join-Path $env:USERPROFILE ".tauri\tktiku-updater.password.dpapi"
+$passwordPath = Join-Path $keyDirectory "tktiku-updater.password.dpapi"
 if (-not (Test-Path -LiteralPath $privateKeyPath -PathType Leaf)) {
     throw "缺少更新签名私钥：$privateKeyPath"
 }
@@ -79,9 +112,12 @@ if ($NotesFile) {
     $notes = (Get-Content -LiteralPath $resolvedNotes -Raw).Trim()
 }
 
-$stagingDirectory = Join-Path $repoRoot ".codex-tmp\desktop-updates\$version"
+$stagingDirectory = Join-Path ([IO.Path]::GetDirectoryName($destinationDirectory)) (".update-" + [Guid]::NewGuid().ToString('N'))
+& python $qualityScript verify --scope desktop --receipt $QualityReceipt
+if ($LASTEXITCODE -ne 0) { throw '构建期间源码或检查凭证已改变，已拒绝归档。' }
 $filesDirectory = Join-Path $stagingDirectory "files"
 New-Item -ItemType Directory -Path $filesDirectory -Force | Out-Null
+Copy-Item -LiteralPath $QualityReceipt -Destination (Join-Path $stagingDirectory 'quality-checks.json')
 $publicInstallerName = "tktiku-desktop_${version}_windows_x86_64-setup.exe"
 $publicInstallerPath = Join-Path $filesDirectory $publicInstallerName
 $publicSignaturePath = "$publicInstallerPath.sig"
@@ -104,6 +140,11 @@ $manifestPath = Join-Path $stagingDirectory "latest.json"
 $manifestJson = $manifest | ConvertTo-Json -Depth 6
 [IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
 
+# Directory.Move refuses an existing destination, including a concurrent build.
+[IO.Directory]::Move($stagingDirectory, $destinationDirectory)
+$publicInstallerPath = Join-Path $destinationDirectory "files\$publicInstallerName"
+$publicSignaturePath = "$publicInstallerPath.sig"
+$manifestPath = Join-Path $destinationDirectory "latest.json"
 $hash = Get-FileHash -LiteralPath $publicInstallerPath -Algorithm SHA256
 [pscustomobject]@{
     Version = $version
@@ -112,4 +153,7 @@ $hash = Get-FileHash -LiteralPath $publicInstallerPath -Algorithm SHA256
     Manifest = $manifestPath
     SizeBytes = (Get-Item -LiteralPath $publicInstallerPath).Length
     SHA256 = $hash.Hash
+}
+} finally {
+    if ($ownsQualityReceipt) { Remove-Item -LiteralPath $QualityReceipt -ErrorAction SilentlyContinue }
 }

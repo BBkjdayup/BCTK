@@ -22,7 +22,9 @@ import {
 } from '@element-plus/icons-vue'
 import DocumentEntryTemplateDialog from '../components/DocumentEntryTemplateDialog.vue'
 import RichTextEditor from '../components/RichTextEditor.vue'
+import FormulaCompatibilityNotice from '../components/FormulaCompatibilityNotice.vue'
 import { backend } from '../services/backend'
+import { registerCloseGuard } from '../services/closeProtection'
 import { errorMessage } from '../services/errors'
 import { useAppStore } from '../stores/app'
 import { useQuestionBankStore } from '../stores/questionBank'
@@ -98,6 +100,8 @@ const activeEntryTemplate = ref<DocumentEntryTemplate>(systemDocumentEntryTempla
 const templateDialogOpen = ref(false)
 let autosaveTimer: ReturnType<typeof setInterval> | undefined
 let lastAutosavedSnapshot: string | null = null
+let activeAutosave: Promise<boolean> | null = null
+let unregisterCloseGuard: (() => void) | undefined
 
 const sourceCharacterCount = computed(() => source.value.plainText.length)
 const sourceLineCount = computed(() => {
@@ -198,23 +202,23 @@ function legacyItemsToFreeDocument(items: readonly DocumentQuestionDraftItem[]) 
   return plainTextLinesRichContent(lines)
 }
 
-async function autosave(showSuccess = false) {
-  if (!ready.value || !dirty.value || savingDraft.value) return true
-  const snapshot = serializePayload()
-  if (snapshot === lastAutosavedSnapshot) {
-    dirty.value = false
-    if (showSuccess) ElMessage.success('草稿已经是最新状态')
-    return true
-  }
+async function persistLatestDraft() {
   savingDraft.value = true
   try {
-    const record = await backend.saveDocumentQuestionDraft(payloadSnapshot())
-    if (!hasPersistedDraft.value) updatePendingDraftCount(1)
-    hasPersistedDraft.value = true
-    lastAutosavedAt.value = record.autosavedAt
-    lastAutosavedSnapshot = snapshot
-    dirty.value = false
-    if (showSuccess) ElMessage.success('自由录题文档已保存到 SQLite')
+    while (ready.value && dirty.value) {
+      const payload = payloadSnapshot()
+      const snapshot = JSON.stringify(payload)
+      if (snapshot !== lastAutosavedSnapshot) {
+        const record = await backend.saveDocumentQuestionDraft(payload)
+        if (!hasPersistedDraft.value) updatePendingDraftCount(1)
+        hasPersistedDraft.value = true
+        lastAutosavedAt.value = record.autosavedAt
+        lastAutosavedSnapshot = snapshot
+      }
+      // A completed write only acknowledges its own snapshot. Keep writing
+      // changes made while it was pending before navigation/close can proceed.
+      dirty.value = serializePayload() !== snapshot
+    }
     return true
   } catch (reason) {
     ElMessage.error(errorMessage(reason, '自由录题文档保存失败，请检查本地数据库。'))
@@ -224,7 +228,21 @@ async function autosave(showSuccess = false) {
   }
 }
 
+async function autosave(showSuccess = false) {
+  if (!ready.value) return true
+  if (!activeAutosave && dirty.value) activeAutosave = persistLatestDraft()
+  const operation = activeAutosave
+  try {
+    const saved = operation ? await operation : true
+    if (saved && showSuccess) ElMessage.success('自由录题文档已保存到 SQLite')
+    return saved
+  } finally {
+    if (activeAutosave === operation) activeAutosave = null
+  }
+}
+
 async function deletePersistedDraft() {
+  if (activeAutosave && !await activeAutosave) throw new Error('草稿尚未保存，不能清理')
   await backend.deleteDocumentQuestionDraft()
   if (hasPersistedDraft.value) updatePendingDraftCount(-1)
   hasPersistedDraft.value = false
@@ -512,11 +530,13 @@ async function replaceExistingWordImportDraftIfNeeded() {
 }
 
 async function beginRecognition() {
+  if (recognizing.value) return
   if (!source.value.plainText.trim()) {
     ElMessage.warning('当前纸张还是空白的，请先按照编辑区内的灰色模板提示手工输入题目内容。')
     sourceEditor.value?.focus()
     return
   }
+  const recognitionSnapshot = serializePayload()
   const result = recognizeLabeledQuestionDocument(
     source.value,
     activeEntryTemplate.value.config,
@@ -528,6 +548,7 @@ async function beginRecognition() {
     return
   }
 
+  recognizing.value = true
   try {
     await ElMessageBox.confirm(
       `本次识别到 ${result.questions.length} 道题，包含 ${recognitionErrorCount.value} 个必须校对的问题和 ${recognitionWarningCount.value} 个提示。是否进入与 Word 导入相同的识别结果审查页？`,
@@ -540,13 +561,16 @@ async function beginRecognition() {
       },
     )
   } catch {
+    recognizing.value = false
     return
   }
-
-  recognizing.value = true
   try {
     if (!await autosave()) return
     if (!await replaceExistingWordImportDraftIfNeeded()) return
+    if (recognitionSnapshot !== serializePayload()) {
+      ElMessage.warning('原文档已修改，请重新识别最新内容。')
+      return
+    }
     const reviewItems = buildReviewItems(result)
     const payload: WordImportDraftPayload = {
       schemaVersion: 1,
@@ -561,6 +585,11 @@ async function beginRecognition() {
     }
     await backend.saveWordImportDraft(payload)
     updatePendingDraftCount(1)
+    if (recognitionSnapshot !== serializePayload()) {
+      await autosave()
+      ElMessage.warning('原文档已修改并保留草稿，请重新识别最新内容。')
+      return
+    }
     dirty.value = false
     try {
       await deletePersistedDraft()
@@ -600,16 +629,18 @@ onMounted(() => {
   autosaveTimer = setInterval(() => { void autosave() }, 60000)
   window.addEventListener('beforeunload', warnBeforeBrowserClose)
   window.addEventListener('keydown', onKeydown)
+  unregisterCloseGuard = registerCloseGuard(confirmSaveAndLeave)
 })
 
 onBeforeUnmount(() => {
+  unregisterCloseGuard?.()
   clearInterval(autosaveTimer)
   window.removeEventListener('beforeunload', warnBeforeBrowserClose)
   window.removeEventListener('keydown', onKeydown)
 })
 
-onBeforeRouteLeave(async () => {
-  if (!dirty.value) return true
+async function confirmSaveAndLeave() {
+  if (!dirty.value) return await autosave()
   try {
     await ElMessageBox.confirm(
       '当前自由录题文档尚未保存，离开前保存到 SQLite 草稿吗？',
@@ -624,11 +655,13 @@ onBeforeRouteLeave(async () => {
   } catch {
     return false
   }
-})
+}
+onBeforeRouteLeave(confirmSaveAndLeave)
 </script>
 
 <template>
   <section class="document-entry-page">
+    <FormulaCompatibilityNotice :fields="[{ label: '自由录题文档', content: source }]" />
     <header class="entry-page-header">
       <div class="entry-header-left">
         <el-button :icon="Back" @click="router.push('/questions/new')">表单录入</el-button>

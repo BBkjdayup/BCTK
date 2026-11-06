@@ -186,11 +186,16 @@ async function startImport() {
 
     selectedTemplateId.value = result.template.id
     mode.value = 'detail'
+    const detachedTemplate = result.diagnostics.some((item) => item.code === 'TEMPLATE_ATTACHED_TEMPLATE_REMOVED')
     if (!templateCanExport(result.template)) {
-      ElMessage.warning('模板已安全导入，请选择试题内容在 Word 中的放置位置。')
+      ElMessage.warning(detachedTemplate
+        ? '已解除旧 Word 模板关联并导入，请选择试题内容的放置位置。'
+        : '模板已安全导入，请选择试题内容在 Word 中的放置位置。')
       openConfiguration(result.template)
     } else if (result.template.analysisStatus === 'warning') {
-      ElMessage.warning('模板已导入，请查看分析警告。')
+      ElMessage.warning(detachedTemplate
+        ? '模板已导入，并已解除旧 Word 模板关联；详情见分析诊断。'
+        : '模板已导入，请查看分析警告。')
     } else {
       ElMessage.success('模板已导入并由软件统一管理。')
     }

@@ -39,7 +39,7 @@ export function enabledQuestionTypes(definitions?: readonly QuestionTypeDefiniti
   return effectiveQuestionTypes(definitions).filter((definition) => definition.isEnabled)
 }
 
-export function questionTypeDefinition(
+function questionTypeDefinition(
   code: QuestionType,
   definitions?: readonly QuestionTypeDefinition[],
 ) {

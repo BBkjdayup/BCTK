@@ -10,10 +10,10 @@ use crate::docx::raw_copy_with_replacements;
 use crate::docx::{
     Diagnostic, DiagnosticSeverity, DocumentTable, DocxError, DocxLimits,
     ExtractedEditableFormulaOccurrence, ExtractedImageOccurrence, ExtractedMathTypeOccurrence,
-    FORMULA_PLACEHOLDER, PackageInspection, PackageKind, Paragraph, RawCopyExport, ScriptKind,
-    ScriptRun, inspect_docx, raw_copy_with_replacements_and_additions, read_document_from_docx,
-    read_images_from_docx, read_mathtype_from_docx, read_omml_from_docx,
-    unicode_math_text_to_latex,
+    FORMULA_PLACEHOLDER, PackageInspection, PackageKind, Paragraph, ParsedDocument, RawCopyExport,
+    ScriptKind, ScriptRun, ValidatedPackage, inspect_docx,
+    raw_copy_with_replacements_and_additions, read_images_from_package, read_mathtype_from_package,
+    read_omml_from_document, unicode_math_text_to_latex,
 };
 
 #[cfg(test)]
@@ -53,16 +53,18 @@ pub(super) struct PreparedWordImportSource {
     pub tables: Vec<DocumentTable>,
 }
 
-pub(super) fn analyze(request: AnalyzeDocxRequestApi) -> CommandResult<DocxAnalysisApi> {
-    let source = validate_source_path(&request.input_path)?;
-    let limits = DocxLimits::default();
-    let bytes = read_source_bounded(&source.canonical, limits.max_archive_bytes)?;
-    analyze_loaded_source(&source, &bytes, &limits)
-}
-
+#[cfg(test)]
 pub(super) fn prepare_word_import(
     request: AnalyzeDocxRequestApi,
 ) -> CommandResult<PreparedWordImportSource> {
+    prepare_word_import_with_task(request, &super::tasks::Context::default())
+}
+
+pub(super) fn prepare_word_import_with_task(
+    request: AnalyzeDocxRequestApi,
+    task: &super::tasks::Context,
+) -> CommandResult<PreparedWordImportSource> {
+    task.checkpoint("检查 Word 文件结构", 0, None)?;
     let source = validate_source_path(&request.input_path)?;
     if source.file_kind != WordFileKind::Document {
         return Err(CommandError::new(
@@ -87,7 +89,15 @@ pub(super) fn prepare_word_import(
         ..DocxLimits::default()
     };
     let source_bytes = read_source_bounded(&source.canonical, limits.max_archive_bytes)?;
-    let mut analysis = analyze_loaded_source(&source, &source_bytes, &limits)?;
+    let mut package =
+        ValidatedPackage::open(&source_bytes, &limits).map_err(import_analysis_error)?;
+    let document = package.read_document().map_err(import_analysis_error)?;
+    let mut analysis = analyze_document(
+        &source,
+        u64::try_from(source_bytes.len()).unwrap_or(u64::MAX),
+        package.inspection(),
+        &document,
+    )?;
     if !analysis.is_valid {
         let message = analysis
             .diagnostics
@@ -97,43 +107,36 @@ pub(super) fn prepare_word_import(
             .unwrap_or_else(|| "Word 文档未通过安全与结构检查。".to_owned());
         return Err(CommandError::new("DOCX_IMPORT_ANALYSIS_REJECTED", message));
     }
-    let mut images =
-        read_images_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
-            let message = diagnostics_from_error(error)
-                .into_iter()
-                .next()
-                .map(|diagnostic| diagnostic.message)
-                .unwrap_or_else(|| "无法安全提取 Word 图片。".to_owned());
-            CommandError::new("DOCX_IMAGE_EXTRACTION_FAILED", message)
-        })?;
-    let document =
-        read_document_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
-            let message = diagnostics_from_error(error)
-                .into_iter()
-                .next()
-                .map(|diagnostic| diagnostic.message)
-                .unwrap_or_else(|| "无法安全提取 Word 表格结构。".to_owned());
-            CommandError::new("DOCX_TABLE_EXTRACTION_FAILED", message)
-        })?;
+    task.checkpoint("提取图片", 0, None)?;
+    let mut images = read_images_from_package(&mut package).map_err(|error| {
+        let message = diagnostics_from_error(error)
+            .into_iter()
+            .next()
+            .map(|diagnostic| diagnostic.message)
+            .unwrap_or_else(|| "无法安全提取 Word 图片。".to_owned());
+        CommandError::new("DOCX_IMAGE_EXTRACTION_FAILED", message)
+    })?;
+    task.checkpoint("读取段落与表格", 0, None)?;
     let tables = document.tables.clone();
-    let native_formulas =
-        read_omml_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
-            let message = diagnostics_from_error(error)
-                .into_iter()
-                .next()
-                .map(|diagnostic| diagnostic.message)
-                .unwrap_or_else(|| "无法安全转换 Word 原生公式。".to_owned());
-            CommandError::new("DOCX_OMML_CONVERSION_FAILED", message)
-        })?;
-    let mathtype_formulas =
-        read_mathtype_from_docx(Cursor::new(&source_bytes), &limits).map_err(|error| {
-            let message = diagnostics_from_error(error)
-                .into_iter()
-                .next()
-                .map(|diagnostic| diagnostic.message)
-                .unwrap_or_else(|| "无法安全转换 Word 中的 MathType 公式。".to_owned());
-            CommandError::new("DOCX_MATHTYPE_CONVERSION_FAILED", message)
-        })?;
+    task.checkpoint("转换 Word 原生公式", 0, None)?;
+    let native_formulas = read_omml_from_document(&document).map_err(|error| {
+        let message = diagnostics_from_error(error)
+            .into_iter()
+            .next()
+            .map(|diagnostic| diagnostic.message)
+            .unwrap_or_else(|| "无法安全转换 Word 原生公式。".to_owned());
+        CommandError::new("DOCX_OMML_CONVERSION_FAILED", message)
+    })?;
+    task.checkpoint("转换 MathType 公式", 0, None)?;
+    let mathtype_formulas = read_mathtype_from_package(&mut package).map_err(|error| {
+        let message = diagnostics_from_error(error)
+            .into_iter()
+            .next()
+            .map(|diagnostic| diagnostic.message)
+            .unwrap_or_else(|| "无法安全转换 Word 中的 MathType 公式。".to_owned());
+        CommandError::new("DOCX_MATHTYPE_CONVERSION_FAILED", message)
+    })?;
+    task.checkpoint("整理公式和上下标位置", 0, None)?;
     let final_mathtype_offsets = merge_mathtype_occurrences(&mut analysis, &mathtype_formulas)?;
     let mut formulas =
         normalize_formula_occurrences(native_formulas, mathtype_formulas, &final_mathtype_offsets);
@@ -143,6 +146,12 @@ pub(super) fn prepare_word_import(
         &mut formulas,
         &mut images,
     )?;
+    task.checkpoint(
+        "文件识别完成",
+        analysis.paragraphs.len(),
+        Some(analysis.paragraphs.len()),
+    )?;
+    drop(package);
     Ok(PreparedWordImportSource {
         analysis,
         source_filename,
@@ -492,48 +501,21 @@ fn merge_word_script_runs(
     Ok(())
 }
 
-fn analyze_loaded_source(
+fn import_analysis_error(error: DocxError) -> CommandError {
+    let message = diagnostics_from_error(error)
+        .into_iter()
+        .next()
+        .map(|diagnostic| diagnostic.message)
+        .unwrap_or_else(|| "Word 文档未通过安全与结构检查。".to_owned());
+    CommandError::new("DOCX_IMPORT_ANALYSIS_REJECTED", message)
+}
+
+fn analyze_document(
     source: &SourcePath,
-    bytes: &[u8],
-    limits: &DocxLimits,
+    archive_bytes: u64,
+    inspection: &PackageInspection,
+    parsed: &ParsedDocument,
 ) -> CommandResult<DocxAnalysisApi> {
-    let archive_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    let inspection = match inspect_docx(Cursor::new(bytes), limits) {
-        Ok(inspection) => inspection,
-        Err(error) => {
-            return Ok(empty_analysis(
-                &source.display,
-                archive_bytes,
-                "unknown",
-                0,
-                0,
-                diagnostics_from_error(error),
-            ));
-        }
-    };
-
-    if !inspection.is_acceptable() {
-        return Ok(analysis_from_rejected_inspection(
-            &source.display,
-            archive_bytes,
-            &inspection,
-        ));
-    }
-
-    let parsed = match read_document_from_docx(Cursor::new(bytes), limits) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return Ok(empty_analysis(
-                &source.display,
-                archive_bytes,
-                package_kind_name(inspection.package_kind),
-                saturating_u32(inspection.parts.len()),
-                inspection.total_uncompressed_bytes,
-                diagnostics_from_error(error),
-            ));
-        }
-    };
-
     let visible_bytes = parsed.paragraphs.iter().fold(0usize, |total, paragraph| {
         total.saturating_add(paragraph.logical_text.len().saturating_add(1))
     });
@@ -993,25 +975,6 @@ impl From<&Diagnostic> for DocxDiagnosticApi {
             suggested_action: diagnostic.suggested_action.clone(),
         }
     }
-}
-
-fn analysis_from_rejected_inspection(
-    source_path: &str,
-    archive_bytes: u64,
-    inspection: &PackageInspection,
-) -> DocxAnalysisApi {
-    empty_analysis(
-        source_path,
-        archive_bytes,
-        package_kind_name(inspection.package_kind),
-        saturating_u32(inspection.parts.len()),
-        inspection.total_uncompressed_bytes,
-        inspection
-            .diagnostics
-            .iter()
-            .map(DocxDiagnosticApi::from)
-            .collect(),
-    )
 }
 
 fn empty_analysis(
@@ -1554,6 +1517,9 @@ mod tests {
                     .map(|table| {
                         serde_json::json!({
                             "tableIndex": table.index,
+                            "widthPx": table.width_px,
+                            "columnWidthsPx": table.column_widths_px,
+                            "rowMinHeightsPx": table.row_min_heights_px,
                             "rows": table.rows.iter().map(|row| {
                                 row.iter().map(|cell| serde_json::json!({
                                     "paragraphIndices": cell.paragraph_indices,

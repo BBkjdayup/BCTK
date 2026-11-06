@@ -1,3 +1,4 @@
+import { readAllPages, type PageReadOptions } from './boundedPages'
 import type {
   PageResult,
   PaperItem,
@@ -6,13 +7,13 @@ import type {
 } from '../types/domain'
 import { clonePlain } from './clonePlain'
 
-export const QUESTION_FETCH_PAGE_SIZE = 100
-export const QUESTION_FETCH_MAX_PAGES = 500
-export const QUESTION_FETCH_MAX_ITEMS = 50_000
+const QUESTION_FETCH_PAGE_SIZE = 100
+const QUESTION_FETCH_MAX_PAGES = 500
+const QUESTION_FETCH_MAX_ITEMS = 50_000
 
 export type QuestionPageLoader = (filters: QuestionFilters) => Promise<PageResult<Question>>
 
-export class QuestionPageReadError extends Error {
+class QuestionPageReadError extends Error {
   constructor(
     message: string,
     readonly code:
@@ -25,84 +26,28 @@ export class QuestionPageReadError extends Error {
   }
 }
 
-interface FetchAllQuestionsOptions {
-  pageSize?: number
-  maxPages?: number
-  maxItems?: number
-}
-
-function positiveInteger(value: number | undefined, fallback: number, maximum?: number) {
-  if (value === undefined) return fallback
-  if (!Number.isSafeInteger(value) || value < 1 || (maximum !== undefined && value > maximum)) {
-    throw new QuestionPageReadError('分页读取参数无效。', 'QUESTION_PAGE_RESPONSE_INVALID')
-  }
-  return value
-}
-
-/**
- * Reads every page covered by one question filter.
- *
- * The list API is offset based. If the total changes or a question appears on
- * two pages while reading, continuing could silently omit a question. In that
- * case this helper deliberately stops and asks the caller to retry.
- */
 export async function fetchAllMatchingQuestions(
   loadPage: QuestionPageLoader,
   filters: QuestionFilters,
-  options: FetchAllQuestionsOptions = {},
+  options: PageReadOptions = {},
 ): Promise<Question[]> {
-  const pageSize = positiveInteger(options.pageSize, QUESTION_FETCH_PAGE_SIZE, QUESTION_FETCH_PAGE_SIZE)
-  const maxPages = positiveInteger(options.maxPages, QUESTION_FETCH_MAX_PAGES)
-  const maxItems = positiveInteger(options.maxItems, QUESTION_FETCH_MAX_ITEMS)
-  const baseFilters: QuestionFilters = {
-    ...filters,
-    tagIds: [...filters.tagIds],
-    page: 1,
-    pageSize,
-  }
-  const questions: Question[] = []
-  const seenIds = new Set<string>()
-  let expectedTotal: number | null = null
-
-  for (let page = 1; page <= maxPages; page += 1) {
-    const result = await loadPage({ ...baseFilters, tagIds: [...baseFilters.tagIds], page })
-    if (!Number.isSafeInteger(result.total) || result.total < 0
-      || result.page !== page
-      || result.pageSize !== pageSize
-      || !Array.isArray(result.items)
-      || result.items.length > pageSize) {
-      throw new QuestionPageReadError('题库返回了无效的分页数据，请重试。', 'QUESTION_PAGE_RESPONSE_INVALID')
-    }
-
-    if (expectedTotal === null) {
-      expectedTotal = result.total
-      if (expectedTotal > maxItems || Math.ceil(expectedTotal / pageSize) > maxPages) {
-        throw new QuestionPageReadError(
-          `符合条件的题目超过安全读取上限（${maxItems} 道），请缩小学科、章节或题型范围。`,
-          'QUESTION_PAGE_LIMIT_EXCEEDED',
-        )
+  const baseFilters = { ...filters, tagIds: [...filters.tagIds] }
+  return readAllPages(
+    (page, pageSize) => loadPage({ ...baseFilters, tagIds: [...baseFilters.tagIds], page, pageSize }),
+    { pageSize: QUESTION_FETCH_PAGE_SIZE, maxPages: QUESTION_FETCH_MAX_PAGES, maxItems: QUESTION_FETCH_MAX_ITEMS },
+    options,
+    (code, reason, { maxItems, maxPages }) => {
+      const messages = {
+        parameters: '分页读取参数无效。',
+        response: '题库返回了无效的分页数据，请重试。',
+        limit: `符合条件的题目超过安全读取上限（${maxItems} 道），请缩小学科、章节或题型范围。`,
+        total: '读取期间题库内容发生变化，请重新操作。',
+        duplicate: '读取期间题库顺序发生变化，请重新操作。',
+        incomplete: '题库分页数据不完整，请重新操作。',
+        pages: `符合条件的题目超过安全页数上限（${maxPages} 页），请缩小筛选范围。`,
       }
-    } else if (result.total !== expectedTotal) {
-      throw new QuestionPageReadError('读取期间题库内容发生变化，请重新操作。', 'QUESTION_PAGE_DATA_CHANGED')
-    }
-
-    for (const question of result.items) {
-      if (!question.id || seenIds.has(question.id)) {
-        throw new QuestionPageReadError('读取期间题库顺序发生变化，请重新操作。', 'QUESTION_PAGE_DATA_CHANGED')
-      }
-      seenIds.add(question.id)
-      questions.push(question)
-    }
-
-    if (questions.length === expectedTotal) return questions
-    if (questions.length > expectedTotal || result.items.length < pageSize) {
-      throw new QuestionPageReadError('题库分页数据不完整，请重新操作。', 'QUESTION_PAGE_DATA_CHANGED')
-    }
-  }
-
-  throw new QuestionPageReadError(
-    `符合条件的题目超过安全页数上限（${maxPages} 页），请缩小筛选范围。`,
-    'QUESTION_PAGE_LIMIT_EXCEEDED',
+      return new QuestionPageReadError(messages[reason], `QUESTION_${code}`)
+    },
   )
 }
 

@@ -119,6 +119,8 @@ export interface Question {
   contentVersion: number
 }
 
+export type QuestionSummary = Omit<Question, 'options' | 'answer' | 'explanation' | 'resourceRefs'>
+
 export interface QuestionDraft {
   /** Persisted in autosaved drafts until the teacher explicitly checks the answer. */
   answerReviewRequired?: boolean
@@ -407,6 +409,9 @@ export interface DocxTableCell {
 export interface DocxTableOccurrence {
   tableIndex: number
   rows: DocxTableCell[][]
+  widthPx?: number | null
+  columnWidthsPx?: number[]
+  rowMinHeightsPx?: Array<number | null>
 }
 
 export interface BeginWordImportResult {
@@ -534,6 +539,18 @@ export interface QuestionBatchTarget {
   expectedContentVersion: number
 }
 
+export interface QuestionDuplicateMergeRequest {
+  keeperId: string
+  members: QuestionBatchTarget[]
+  duplicateKind: 'exact' | 'suspected'
+}
+export interface QuestionDuplicateMergeReceipt {
+  id: string
+  keeperId: string
+  recycledCount: number
+  mergedTagCount: number
+}
+
 export interface QuestionBatchClassification {
   subjectId: string
   chapterId: string
@@ -560,6 +577,7 @@ export interface QuestionBatchVersion {
 }
 
 export interface QuestionBatchEditResult {
+  undoId?: string
   updatedCount: number
   questions: QuestionBatchVersion[]
 }
@@ -1075,3 +1093,17 @@ export interface AppSettings {
   automaticBackupIntervalDays: number
   automaticBackupRetentionCount: number
 }
+export interface StartupProgress {
+  phase: string
+  message: string
+  completed: number | null
+  total: number | null
+  elapsedMs: number
+  finished: boolean
+  error: string | null
+  logPath: string | null
+}
+
+export interface QuestionHistoryEntry { id:string; contentVersion:number; savedAt:number }
+export interface QuestionBatchReceipt { id:string; createdAt:number; count:number }
+export interface SavedQuestionFilter { id:string; name:string; filters:QuestionFilters }

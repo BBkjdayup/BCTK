@@ -187,9 +187,9 @@ describe('mockBackend', () => {
     const restoredLegacy = (await mockBackend.getDocumentQuestionDraft())?.payload
     expect(restoredLegacy?.schemaVersion).toBe(1)
     expect(restoredLegacy?.schemaVersion === 1 ? restoredLegacy.items : []).toHaveLength(1)
-    const saved = await mockBackend.saveQuestions([question])
+    const saved = await mockBackend.saveImportedQuestions([{ ...question, id: crypto.randomUUID() }])
     expect(saved).toHaveLength(1)
-    expect(saved[0]?.stem.plainText).toBe('文档式录入测试题')
+    expect((await mockBackend.getQuestion(saved[0]!))?.stem.plainText).toBe('文档式录入测试题')
 
     await mockBackend.deleteDocumentQuestionDraft()
     expect(await mockBackend.getDocumentQuestionDraft()).toBeNull()
@@ -664,7 +664,7 @@ describe('mockBackend', () => {
     const { backend: restoredBackend } = await import('./backend')
     expect((await restoredBackend.getQuestionDraft(null))?.id).toBe(saved.id)
     await restoredBackend.deleteQuestionDraft(null)
-    expect(await restoredBackend.listQuestionDrafts()).toEqual([])
+    expect(await restoredBackend.getQuestionDraft(null)).toBeNull()
     expect((await restoredBackend.initialize()).pendingDraftCount).toBe(0)
   })
 

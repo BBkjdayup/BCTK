@@ -24,26 +24,25 @@ use super::{
     AppState, backups, document_entry_templates, docx, drafts, excel_import,
     models::{
         AnalyzeDocxRequestApi, AppSettingsApi, AutomaticBackupRunApi, BackupCreateResultApi,
-        BackupInspectionApi, BackupRecordApi, BeginExcelImportResultApi, BeginWordImportResultApi,
-        BootstrapDataApi, ChapterApi, CommandError, CommandResult,
-        ConfigureTemplateRegionsRequestApi, DataMovePlanApi, DataMoveResultApi,
-        DataMoveScheduledApi, DocumentEntryTemplateApi, DocumentQuestionDraftPayloadApi,
-        DocumentQuestionDraftRecordApi, DocxAnalysisApi, DocxDiagnosticApi, ExcelImportRequestApi,
-        ExcelImportTemplateResultApi, ExcelWorkbookInspectionApi, ExportPaperDocxRequestApi,
-        IgnoreQuestionDuplicateRequestApi, ImportedQuestionOverwriteRequestApi,
-        ImportedQuestionOverwriteResultApi, ManagedImagePayloadApi, PageResultApi, PaperApi,
-        PaperDeleteRequestApi, PaperDocxExportResultApi, PaperFiltersApi, PaperRecoveryApi,
-        PaperSummaryApi, QuestionApi, QuestionBankExportResultApi, QuestionBatchEditRequestApi,
-        QuestionBatchEditResultApi, QuestionDraftApi, QuestionDraftRecordApi,
-        QuestionDuplicateBatchRequestApi, QuestionDuplicateBatchResultApi,
-        QuestionDuplicateCheckApi, QuestionDuplicateScanRequestApi, QuestionDuplicateScanResultApi,
-        QuestionFiltersApi, QuestionStemSummaryApi, QuestionTypeDefinitionApi,
-        RandomDrawAnalysisApi, RandomDrawRequestApi, RandomDrawScopeApi,
-        ReadWpsClipboardImagesRequestApi, RestorePlanApi, RestoreResultApi, RestoreScheduledApi,
-        SaveDocumentEntryTemplateRequestApi, SaveQuestionTypeRequestApi,
-        ScheduleDataMoveRequestApi, ScheduleRestoreRequestApi, StoreManagedImagesRequestApi,
-        SubjectApi, TagApi, TaxonomyOrderItemApi, TemplateAnchorApi, TemplateByteSpanApi,
-        TemplateConfigurationParagraphApi, TemplateConfigurationPreviewApi,
+        BackupRecordApi, BeginExcelImportResultApi, BeginWordImportResultApi, BootstrapDataApi,
+        ChapterApi, CommandError, CommandResult, ConfigureTemplateRegionsRequestApi,
+        DataMovePlanApi, DataMoveResultApi, DataMoveScheduledApi, DocumentEntryTemplateApi,
+        DocumentQuestionDraftPayloadApi, DocumentQuestionDraftRecordApi, DocxDiagnosticApi,
+        ExcelImportRequestApi, ExcelImportTemplateResultApi, ExcelWorkbookInspectionApi,
+        ExportPaperDocxRequestApi, IgnoreQuestionDuplicateRequestApi,
+        ImportedQuestionOverwriteRequestApi, ImportedQuestionOverwriteResultApi,
+        ManagedImagePayloadApi, PageResultApi, PaperApi, PaperDeleteRequestApi,
+        PaperDocxExportResultApi, PaperFiltersApi, PaperRecoveryApi, PaperSummaryApi, QuestionApi,
+        QuestionBankExportResultApi, QuestionBatchEditRequestApi, QuestionBatchEditResultApi,
+        QuestionDraftApi, QuestionDraftRecordApi, QuestionDuplicateBatchRequestApi,
+        QuestionDuplicateBatchResultApi, QuestionDuplicateCheckApi,
+        QuestionDuplicateScanRequestApi, QuestionDuplicateScanResultApi, QuestionFiltersApi,
+        QuestionStemSummaryApi, QuestionTypeDefinitionApi, RandomDrawAnalysisApi,
+        RandomDrawRequestApi, RandomDrawScopeApi, ReadWpsClipboardImagesRequestApi, RestorePlanApi,
+        RestoreResultApi, RestoreScheduledApi, SaveDocumentEntryTemplateRequestApi,
+        SaveQuestionTypeRequestApi, ScheduleDataMoveRequestApi, ScheduleRestoreRequestApi,
+        StoreManagedImagesRequestApi, SubjectApi, TagApi, TaxonomyOrderItemApi, TemplateAnchorApi,
+        TemplateByteSpanApi, TemplateConfigurationParagraphApi, TemplateConfigurationPreviewApi,
         TemplateImportResultApi, TemplateLayoutPreviewApi, TemplateRegionPlacementApi,
         TemplateStyleSamplesApi, WordImportDraftPayloadApi, WordImportDraftRecordApi,
         WordTemplateApi, WpsClipboardImagePayloadApi,
@@ -81,7 +80,24 @@ struct TagRow {
 }
 
 #[tauri::command]
-pub async fn app_initialize(state: State<'_, AppState>) -> CommandResult<BootstrapDataApi> {
+pub async fn get_startup_progress(
+    startup: State<'_, crate::startup::StartupState>,
+) -> CommandResult<crate::startup::StartupSnapshot> {
+    Ok(startup.progress.snapshot())
+}
+
+#[tauri::command]
+pub async fn app_initialize(
+    app: AppHandle,
+    startup: State<'_, crate::startup::StartupState>,
+) -> CommandResult<BootstrapDataApi> {
+    startup
+        .wait_ready()
+        .await
+        .map_err(|message| CommandError::new("STARTUP_FAILED", message))?;
+    let state = app.try_state::<AppState>().ok_or_else(|| {
+        CommandError::new("STARTUP_FAILED", "题库启动状态不可用，请重新打开软件。")
+    })?;
     let database = match state.database().await {
         Ok(database) => database,
         Err(_) => {
@@ -179,14 +195,6 @@ pub async fn app_initialize(state: State<'_, AppState>) -> CommandResult<Bootstr
 }
 
 #[tauri::command]
-pub async fn list_question_types(
-    state: State<'_, AppState>,
-) -> CommandResult<Vec<QuestionTypeDefinitionApi>> {
-    let database = state.database().await?;
-    question_types::list(database.pool()).await
-}
-
-#[tauri::command]
 pub async fn save_question_type(
     state: State<'_, AppState>,
     request: SaveQuestionTypeRequestApi,
@@ -211,8 +219,20 @@ pub async fn save_question_type_order(
 }
 
 #[tauri::command]
-pub async fn retry_database_initialize(state: State<'_, AppState>) -> CommandResult<()> {
-    state.retry_initialize().await
+pub async fn retry_database_initialize(
+    app: AppHandle,
+    startup: State<'_, crate::startup::StartupState>,
+) -> CommandResult<()> {
+    startup
+        .wait_ready()
+        .await
+        .map_err(|message| CommandError::new("STARTUP_FAILED", message))?;
+    let state = app.try_state::<AppState>().ok_or_else(|| {
+        CommandError::new("STARTUP_FAILED", "题库启动状态不可用，请重新打开软件。")
+    })?;
+    state
+        .retry_initialize_with_progress(&startup.progress)
+        .await
 }
 
 #[tauri::command]
@@ -252,12 +272,55 @@ pub async fn get_question(
 }
 
 #[tauri::command]
+pub async fn list_question_summaries(
+    state: State<'_, AppState>,
+    filters: QuestionFiltersApi,
+) -> CommandResult<PageResultApi<super::models::QuestionSummaryApi>> {
+    let database = state.database().await?;
+    questions::list_question_summaries(database.pool(), &filters).await
+}
+
+#[tauri::command]
+pub async fn get_questions(
+    state: State<'_, AppState>,
+    ids: Vec<String>,
+) -> CommandResult<Vec<QuestionApi>> {
+    if ids.len() > 100 || ids.iter().collect::<std::collections::HashSet<_>>().len() != ids.len() {
+        return Err(CommandError::validation("单次最多读取 100 道不重复的题目"));
+    }
+    for id in &ids {
+        uuid::Uuid::parse_str(id).map_err(|_| CommandError::validation("题目标识无效"))?;
+    }
+    let database = state.database().await?;
+    questions::load_questions_by_ids(database.pool(), &ids).await
+}
+
+#[tauri::command]
 pub async fn get_question_stem_summaries(
     state: State<'_, AppState>,
     ids: Vec<String>,
 ) -> CommandResult<Vec<QuestionStemSummaryApi>> {
     let database = state.database().await?;
     questions::get_question_stem_summaries(database.pool(), &ids).await
+}
+
+#[tauri::command]
+pub async fn check_formula_compatibility(
+    formulas: Vec<String>,
+) -> CommandResult<Vec<Option<String>>> {
+    if formulas.len() > 64 || formulas.iter().map(String::len).sum::<usize>() > 1024 * 1024 {
+        return Err(CommandError::validation(
+            "单次公式检查内容过多，请分批检查。",
+        ));
+    }
+    tokio::task::spawn_blocking(move || {
+        formulas
+            .iter()
+            .map(|latex| tex2word_math::try_to_omath(latex).err())
+            .collect()
+    })
+    .await
+    .map_err(|error| CommandError::new("FORMULA_CHECK_FAILED", error.to_string()))
 }
 
 #[tauri::command]
@@ -287,9 +350,11 @@ pub fn cancel_question_duplicate_scan(scan_id: String) -> CommandResult<()> {
 pub async fn scan_question_duplicates(
     state: State<'_, AppState>,
     request: QuestionDuplicateScanRequestApi,
+    scan_id: Option<String>,
 ) -> CommandResult<QuestionDuplicateScanResultApi> {
     let database = state.database().await?;
-    questions::scan_question_duplicates(database.pool(), &request).await
+    questions::scan_question_duplicates_with_cancel(database.pool(), &request, scan_id.as_deref())
+        .await
 }
 
 #[tauri::command]
@@ -308,15 +373,6 @@ pub async fn save_question(
 ) -> CommandResult<QuestionApi> {
     let database = state.database().await?;
     questions::save_question(database.pool(), &draft, state.app_version()).await
-}
-
-#[tauri::command]
-pub async fn save_questions(
-    state: State<'_, AppState>,
-    drafts: Vec<QuestionDraftApi>,
-) -> CommandResult<Vec<QuestionApi>> {
-    let database = state.database().await?;
-    questions::save_questions(database.pool(), &drafts, state.app_version()).await
 }
 
 #[tauri::command]
@@ -339,15 +395,6 @@ pub async fn save_imported_question_overwrites(
 }
 
 #[tauri::command]
-pub async fn save_imported_question(
-    state: State<'_, AppState>,
-    draft: QuestionDraftApi,
-) -> CommandResult<QuestionApi> {
-    let database = state.database().await?;
-    questions::save_question(database.pool(), &draft, state.app_version()).await
-}
-
-#[tauri::command]
 pub async fn batch_edit_questions(
     state: State<'_, AppState>,
     request: QuestionBatchEditRequestApi,
@@ -363,14 +410,6 @@ pub async fn get_question_draft(
 ) -> CommandResult<Option<QuestionDraftRecordApi>> {
     let database = state.database().await?;
     drafts::get_question_draft(database.pool(), question_id.as_deref()).await
-}
-
-#[tauri::command]
-pub async fn list_question_drafts(
-    state: State<'_, AppState>,
-) -> CommandResult<Vec<QuestionDraftRecordApi>> {
-    let database = state.database().await?;
-    drafts::list_question_drafts(database.pool()).await
 }
 
 #[tauri::command]
@@ -470,6 +509,32 @@ pub async fn save_word_import_draft(
 pub async fn delete_word_import_draft(state: State<'_, AppState>) -> CommandResult<()> {
     let database = state.database().await?;
     drafts::delete_word_import_draft(database.pool()).await
+}
+
+#[tauri::command]
+pub async fn merge_question_duplicates(
+    state: State<'_, AppState>,
+    request: super::duplicate_merge::MergeRequest,
+) -> CommandResult<super::duplicate_merge::MergeReceipt> {
+    let database = state.database().await?;
+    super::duplicate_merge::merge(database.pool(), &request, state.app_version()).await
+}
+
+#[tauri::command]
+pub async fn latest_question_duplicate_merge(
+    state: State<'_, AppState>,
+) -> CommandResult<Option<super::duplicate_merge::MergeReceipt>> {
+    let database = state.database().await?;
+    super::duplicate_merge::latest(database.pool()).await
+}
+
+#[tauri::command]
+pub async fn undo_question_duplicate_merge(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<()> {
+    let database = state.database().await?;
+    super::duplicate_merge::undo(database.pool(), &id, state.app_version()).await
 }
 
 #[tauri::command]
@@ -1267,15 +1332,6 @@ pub async fn run_automatic_backup(
 }
 
 #[tauri::command]
-pub async fn inspect_backup(
-    state: State<'_, AppState>,
-    backup_path: String,
-) -> CommandResult<BackupInspectionApi> {
-    let _maintenance_lease = state.maintenance_read_lease().await;
-    backups::inspect_backup_file(PathBuf::from(backup_path.trim())).await
-}
-
-#[tauri::command]
 pub async fn prepare_restore(
     state: State<'_, AppState>,
     backup_path: String,
@@ -1711,35 +1767,24 @@ pub async fn pick_backup_file(
 }
 
 #[tauri::command]
-pub async fn analyze_docx(
-    state: State<'_, AppState>,
-    request: AnalyzeDocxRequestApi,
-) -> CommandResult<DocxAnalysisApi> {
-    let _maintenance_lease = state.maintenance_read_lease().await;
-    tokio::task::spawn_blocking(move || docx::analyze(request))
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "DOCX_ANALYSIS_TASK_FAILED",
-                format!("Word 分析任务未能正常完成：{error}"),
-            )
-        })?
-}
-
-#[tauri::command]
 pub async fn begin_word_import(
     state: State<'_, AppState>,
     request: AnalyzeDocxRequestApi,
+    task_id: Option<String>,
 ) -> CommandResult<BeginWordImportResultApi> {
+    let task = super::tasks::Task::start(task_id)?;
+    let control = task.context();
     let database = state.exclusive_database().await?;
-    let prepared = tokio::task::spawn_blocking(move || docx::prepare_word_import(request))
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "WORD_IMPORT_TASK_FAILED",
-                format!("Word 导入准备任务未能正常完成：{error}"),
-            )
-        })??;
+    let prepared =
+        tokio::task::spawn_blocking(move || docx::prepare_word_import_with_task(request, &control))
+            .await
+            .map_err(|error| {
+                CommandError::new(
+                    "WORD_IMPORT_TASK_FAILED",
+                    format!("Word 导入准备任务未能正常完成：{error}"),
+                )
+            })??;
+    task.context().begin_commit()?;
     resources::begin_word_import(database.pool(), database.paths(), prepared).await
 }
 
@@ -1763,17 +1808,32 @@ pub async fn inspect_excel_workbook(
 pub async fn begin_excel_import(
     state: State<'_, AppState>,
     request: ExcelImportRequestApi,
+    task_id: Option<String>,
 ) -> CommandResult<BeginExcelImportResultApi> {
+    let task = super::tasks::Task::start(task_id)?;
+    let control = task.context();
     let database = state.exclusive_database().await?;
-    let prepared = tokio::task::spawn_blocking(move || excel_import::prepare_import(request))
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "XLSX_IMPORT_TASK_FAILED",
-                format!("Excel 导入准备任务未能正常完成：{error}"),
-            )
-        })??;
+    let prepared = tokio::task::spawn_blocking(move || {
+        excel_import::prepare_import_with_task(request, &control)
+    })
+    .await
+    .map_err(|error| {
+        CommandError::new(
+            "XLSX_IMPORT_TASK_FAILED",
+            format!("Excel 导入准备任务未能正常完成：{error}"),
+        )
+    })??;
+    task.context().begin_commit()?;
     resources::begin_excel_import(database.pool(), prepared).await
+}
+
+#[tauri::command]
+pub fn background_task_progress(task_id: String) -> CommandResult<super::tasks::Progress> {
+    super::tasks::progress(&task_id)
+}
+#[tauri::command]
+pub fn cancel_background_task(task_id: String) -> CommandResult<()> {
+    super::tasks::cancel(&task_id)
 }
 
 #[tauri::command]
@@ -2198,4 +2258,63 @@ fn default_template_name(original_file_name: &str) -> String {
 
 fn managed_template_error(error: templates_core::ManagedTemplateError) -> CommandError {
     CommandError::new(error.code(), format!("模板文件处理失败：{error}"))
+}
+
+#[tauri::command]
+pub async fn list_question_history(
+    state: State<'_, AppState>,
+    question_id: String,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let db = state.database().await?;
+    super::question_history::list(db.pool(), &question_id).await
+}
+#[tauri::command]
+pub async fn get_question_history(
+    state: State<'_, AppState>,
+    id: String,
+) -> CommandResult<QuestionApi> {
+    let db = state.database().await?;
+    super::question_history::detail(db.pool(), &id).await
+}
+#[tauri::command]
+pub async fn restore_question_history(
+    state: State<'_, AppState>,
+    id: String,
+    expected_version: i64,
+) -> CommandResult<QuestionApi> {
+    let db = state.database().await?;
+    super::question_history::restore(db.pool(), &id, expected_version, state.app_version()).await
+}
+#[tauri::command]
+pub async fn list_question_batches(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let db = state.database().await?;
+    super::question_history::batches(db.pool()).await
+}
+#[tauri::command]
+pub async fn undo_question_batch(state: State<'_, AppState>, id: String) -> CommandResult<()> {
+    let db = state.database().await?;
+    super::question_history::undo(db.pool(), &id, state.app_version()).await
+}
+#[tauri::command]
+pub async fn list_saved_question_filters(
+    state: State<'_, AppState>,
+) -> CommandResult<Vec<serde_json::Value>> {
+    let db = state.database().await?;
+    super::question_history::filters(db.pool()).await
+}
+#[tauri::command]
+pub async fn save_question_filter(
+    state: State<'_, AppState>,
+    name: String,
+    filters: QuestionFiltersApi,
+) -> CommandResult<()> {
+    let db = state.database().await?;
+    super::question_history::save_filter(db.pool(), &name, filters).await
+}
+#[tauri::command]
+pub async fn delete_question_filter(state: State<'_, AppState>, id: String) -> CommandResult<()> {
+    let db = state.database().await?;
+    super::question_history::delete_filter(db.pool(), &id).await
 }

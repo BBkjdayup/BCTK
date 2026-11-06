@@ -286,7 +286,7 @@ fn render_windows(bytes: &[u8], header: &PlaceableHeader) -> Result<Vec<u8>, Str
                 row_bytes,
             )
         };
-        for pixel in row.chunks_exact(4) {
+        for pixel in row.as_chunks::<4>().0 {
             rgb.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
         }
     }

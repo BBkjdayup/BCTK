@@ -958,7 +958,7 @@ fn build_rich_paper(
         return Err(vec![diagnostic(
             "PAPER_EXPORT_RICH_CONTENT_UNSUPPORTED",
             format!("本次试卷有 {total} 处内容暂时无法安全转换：{detail}"),
-            Some("请在提示所列题目中删除不受支持的嵌套表格、外部图片或原始 OOXML 片段后重试。"),
+            Some("请按提示位置检查公式或富文本内容，调整后重试。本次检查没有修改原题或导出文件。"),
         )]);
     }
     Ok(PaperRichDocument {
@@ -1683,6 +1683,100 @@ mod tests {
         assert!(xml.contains("<m:oMath"));
         assert!(xml.contains("<m:sSup>"));
         assert!(!xml.contains("x^{2}"));
+    }
+
+    #[test]
+    fn formula_preflight_reports_each_included_question_field() {
+        let mut item = question();
+        item.stem = rich(r#"<p><span data-latex="\unknown{x}"></span></p>"#, "");
+        item.options[0].content = rich(r#"<p><span data-latex="\frac{1}"></span></p>"#, "");
+        item.answer = rich(
+            r#"<p><span data-latex="\mathbf{\frac{a}{b}}"></span></p>"#,
+            "",
+        );
+        item.explanation = rich(
+            r#"<p><span data-latex="\begin{matrix}1&amp;2"></span></p>"#,
+            "",
+        );
+        let issues = build_rich_paper(
+            "检查",
+            &[item.clone()],
+            PaperContentMode::PaperAnswersExplanations,
+        )
+        .unwrap_err();
+        assert_eq!(issues[0].code, "PAPER_EXPORT_RICH_CONTENT_UNSUPPORTED");
+        for label in [
+            "4 处",
+            "第 1 题题干",
+            "第 1 题选项 1",
+            "第 1 题答案",
+            "第 1 题解析",
+            r"\unknown",
+        ] {
+            assert!(issues[0].message.contains(label), "{}", issues[0].message);
+        }
+        let issues =
+            build_rich_paper("检查", &[item.clone()], PaperContentMode::AnswersOnly).unwrap_err();
+        assert!(issues[0].message.contains("1 处"));
+        assert!(issues[0].message.contains("第 1 题答案"));
+        assert!(!issues[0].message.contains("题干"));
+        item.stem = rich("<p>合法题干</p>", "合法题干");
+        item.options.clear();
+        assert!(build_rich_paper("检查", &[item], PaperContentMode::PaperOnly).is_ok());
+    }
+
+    #[test]
+    fn docx_export_preserves_no_bar_fraction_and_failed_preflight_leaves_file_intact() {
+        let root = std::env::temp_dir().join(format!("tk-formula-export-{}", Uuid::now_v7()));
+        fs::create_dir_all(&root).unwrap();
+        let template = question_bank_template().unwrap();
+        let template_name = format!("{}.docx", Uuid::now_v7());
+        fs::write(root.join(&template_name), &template).unwrap();
+        let mut item = question();
+        let latex = r"\genfrac{}{}{0pt}{}{5}{2}";
+        item.stem = rich(&format!(r#"<p><span data-latex="{latex}"></span></p>"#), "");
+        let mut snapshot = WorkerSnapshot {
+            title: "无横线分式导出".into(),
+            mode: PaperContentMode::PaperOnly,
+            questions: vec![item],
+            managed_template_name: template_name,
+            template_byte_size: template.len() as u64,
+            template_sha256: Sha256::digest(&template).into(),
+            template_style_profile: None,
+            page_setup_override: None,
+            output_path: root.join("formula.docx").to_string_lossy().into_owned(),
+            images: Vec::new(),
+            recovered_image_relationships: 0,
+        };
+        let outcome = perform_export(&root, &snapshot).unwrap();
+        assert!(outcome.exported, "{:?}", outcome.diagnostics);
+        let bytes = fs::read(&outcome.output_path).unwrap();
+        let formulas =
+            crate::docx::read_omml_from_docx(Cursor::new(&bytes), &DocxLimits::default()).unwrap();
+        assert_eq!(formulas.len(), 1);
+        assert_eq!(
+            formulas[0].latex, latex,
+            "fraction structure must survive import/export/import"
+        );
+        assert!(
+            inspect_docx(Cursor::new(&bytes), &DocxLimits::default())
+                .unwrap()
+                .is_acceptable()
+        );
+
+        snapshot.questions[0].stem =
+            rich(r#"<p><span data-latex="\unsupported{x}"></span></p>"#, "");
+        snapshot.output_path = outcome.output_path.clone();
+        let failed = perform_export(&root, &snapshot).unwrap();
+        assert!(!failed.exported);
+        assert!(failed.diagnostics[0].message.contains("第 1 题题干"));
+        assert_eq!(fs::read(&outcome.output_path).unwrap(), bytes);
+        assert_eq!(
+            fs::read_dir(&root).unwrap().count(),
+            2,
+            "failed preflight must not create output or temporary files"
+        );
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

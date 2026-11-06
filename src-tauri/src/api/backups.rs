@@ -13,8 +13,7 @@ use crate::{
 };
 
 use super::models::{
-    AutomaticBackupRunApi, BackupCreateResultApi, BackupInspectionApi, BackupRecordApi,
-    CommandError, CommandResult,
+    AutomaticBackupRunApi, BackupCreateResultApi, BackupRecordApi, CommandError, CommandResult,
 };
 
 const MILLIS_PER_DAY: i64 = 24 * 60 * 60 * 1_000;
@@ -554,19 +553,6 @@ fn reject_backup_destination_inside_managed_payload(
     Ok(())
 }
 
-pub(crate) async fn inspect_backup_file(path: PathBuf) -> CommandResult<BackupInspectionApi> {
-    tokio::task::spawn_blocking(move || backup::inspect_backup(&path, &BackupLimits::default()))
-        .await
-        .map_err(|error| {
-            CommandError::new(
-                "BACKUP_INSPECTION_TASK_FAILED",
-                format!("备份检查任务未能正常完成：{error}"),
-            )
-        })?
-        .map(inspection_api)
-        .map_err(backup_error)
-}
-
 async fn verify_database_snapshot(
     path: &Path,
     expected_schema_version: i64,
@@ -785,21 +771,6 @@ fn backup_record_api(
         error_code: row.error_code,
         error_message: row.error_message,
     })
-}
-
-fn inspection_api(inspection: BackupInspection) -> BackupInspectionApi {
-    BackupInspectionApi {
-        format_version: inspection.manifest.version,
-        created_at: i64::try_from(inspection.manifest.created_at_unix_ms).unwrap_or(i64::MAX),
-        source_app_version: inspection.manifest.application_version,
-        database_schema_version: inspection.manifest.database_schema_version,
-        source_database_uuid: inspection.manifest.database_uuid,
-        archive_sha256_hex: inspection.archive_sha256_hex,
-        manifest_sha256_hex: inspection.manifest_sha256_hex,
-        archive_byte_size: inspection.archive_size_bytes,
-        payload_byte_size: inspection.payload_size_bytes,
-        payload_file_count: inspection.payload_file_count as u64,
-    }
 }
 
 fn managed_relative_filename(managed_backup_dir: &Path, output_path: &Path) -> Option<String> {

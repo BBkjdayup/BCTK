@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive, watch } from 'vue'
 import type {
-  Question,
+  QuestionSummary,
   QuestionBatchEditRequest,
   Subject,
   Tag,
@@ -15,7 +15,7 @@ import {
 
 const props = defineProps<{
   modelValue: boolean
-  questions: Question[]
+  questions: QuestionSummary[]
   subjects: Subject[]
   tags: Tag[]
   busy?: boolean

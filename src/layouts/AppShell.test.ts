@@ -76,12 +76,23 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  appStore.loading = false
   setDesktopRuntime(false)
   route.path = '/questions'
   vi.clearAllMocks()
 })
 
 describe('AppShell runtime identity', () => {
+  it('keeps window controls available but blocks navigation and pages during startup', () => {
+    setDesktopRuntime(true)
+    appStore.loading = true
+    const wrapper = renderShell()
+    expect(wrapper.text()).toContain('正在打开 TK试题题库')
+    expect(wrapper.find('router-view-stub').exists()).toBe(false)
+    expect(wrapper.findAll('.topnav__item').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(wrapper.get('[aria-label="最小化"]').attributes('disabled')).toBeUndefined()
+    wrapper.unmount()
+  })
   it('marks browser rendering as a non-file-writing interface demo', () => {
     setDesktopRuntime(false)
     const wrapper = renderShell()

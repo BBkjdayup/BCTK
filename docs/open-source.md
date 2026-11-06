@@ -2,7 +2,7 @@
 
 ## 源码来源与许可
 
-本仓库最初以 TK试题题库 v0.1.83 的可公开源码快照建立，现已更新到 v0.1.88。公开仓库保留面向社区的独立提交历史；此前的内部开发历史、验收材料和生产发布记录由维护者单独保管。
+本仓库最初以 TK试题题库 v0.1.83 的可公开源码快照建立，现已更新到 v0.1.105。公开仓库保留面向社区的独立提交历史；此前的内部开发历史、验收材料和生产发布记录由维护者单独保管。
 
 原创代码使用 [MIT 许可证](../LICENSE)，允许按许可证条款使用、修改、分发和商用，并要求保留版权与许可声明。第三方组件继续遵守各自许可，见 [THIRD_PARTY_NOTICES.md](../THIRD_PARTY_NOTICES.md)。
 
@@ -38,6 +38,8 @@ pnpm build:installer
 ```
 
 `build:installer` 通过 `src-tauri/tauri.local-build.conf.json` 将 `bundle.createUpdaterArtifacts` 设为 `false`，因此只构建普通安装包，不需要官方更新签名私钥。
+
+`pnpm release:update` 保留官方签名流程的质量门禁，需要本仓库未公开的完整维护工作区和独立发布工具，不能在独立公开克隆中执行正式签名。
 
 该设置不会自动更改应用标识、服务地址或更新公钥。独立分发版本必须使用自己的配置和密钥；官方签名更新的工作原理见 [automatic-updates.md](automatic-updates.md)。
 
