@@ -60,4 +60,4 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-v0.1.88 的源码变化与验证范围见 [发布说明](releases/v0.1.88.md)。未购买商业代码签名证书时，自行构建的安装包同样会显示为未签名。
+v0.1.105 的源码变化与验证范围见 [发布说明](releases/v0.1.105.md)。未购买商业代码签名证书时，自行构建的安装包同样会显示为未签名。

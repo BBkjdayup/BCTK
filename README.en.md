@@ -157,7 +157,9 @@ flowchart TB
 
 This repository contains the desktop client, product website, web-admin frontend, SQLite migrations, tests, and development documentation.
 
-It does **not** contain the standalone cloud backend, the WeChat mini-program client, production deployment configuration, user data, private update-signing keys, or other production credentials. Optional online features require a compatible service and account permissions; the MIT source license does not include an operated service or subscription entitlement.
+It does **not** contain the standalone cloud backend, the WeChat mini-program client, live server environment files, certificate or private-key contents, user data, or other production credentials. `website/deploy/` includes website Nginx configuration and publishing scripts as deployment examples. Replace the public domains, directories, and certificate paths for your own environment; path references do not include the referenced file contents. The client embeds a public key for update verification; the update-signing private key is not included.
+
+Optional online features require a compatible service and account permissions; the MIT source license does not include an operated service or subscription entitlement.
 
 ## Architecture
 
