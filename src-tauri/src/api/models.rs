@@ -42,6 +42,18 @@ pub struct ChapterApi {
     pub sort_order: i64,
     pub question_count: i64,
     pub last_accessed_at: Option<i64>,
+    #[serde(default)]
+    pub units: Vec<UnitApi>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, sqlx::FromRow)]
+#[serde(rename_all = "camelCase")]
+pub struct UnitApi {
+    pub id: String,
+    pub chapter_id: String,
+    pub name: String,
+    pub sort_order: i64,
+    pub question_count: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -158,6 +170,10 @@ pub struct QuestionApi {
     pub created_at: i64,
     pub updated_at: i64,
     pub content_version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -177,6 +193,8 @@ pub struct QuestionSummaryApi {
     pub created_at: i64,
     pub updated_at: i64,
     pub content_version: i64,
+    pub unit_id: Option<String>,
+    pub unit_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -199,6 +217,8 @@ pub struct QuestionDraftApi {
     #[serde(default)]
     pub resource_refs: Vec<QuestionResourceRefApi>,
     pub base_content_version: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -342,6 +362,8 @@ pub struct WordImportDraftItemApi {
     pub action: Option<String>,
     pub needs_check: bool,
     pub check_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unresolved_unit_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -425,6 +447,10 @@ pub struct QuestionDuplicateScanRequestApi {
     pub subject_id: String,
     #[serde(default)]
     pub chapter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default)]
+    pub unassigned_unit: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -450,6 +476,8 @@ pub struct QuestionDuplicateMemberApi {
     pub content_version: i64,
     pub created_at: i64,
     pub updated_at: i64,
+    pub unit_id: Option<String>,
+    pub unit_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -500,6 +528,10 @@ pub struct QuestionFiltersApi {
     pub page: u32,
     #[serde(default = "default_page_size")]
     pub page_size: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
+    #[serde(default)]
+    pub unassigned_unit: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -517,6 +549,8 @@ pub struct RandomDrawScopeApi {
     pub usage: String,
     #[serde(default)]
     pub excluded_question_ids: Vec<String>,
+    #[serde(default)]
+    pub unit_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -550,6 +584,8 @@ pub struct QuestionBatchTargetApi {
 pub struct QuestionBatchClassificationApi {
     pub subject_id: String,
     pub chapter_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unit_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1185,6 +1221,8 @@ pub struct ExcelImportRowApi {
     pub answer: String,
     pub explanation: String,
     pub tag_names: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unit_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]

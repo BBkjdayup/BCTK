@@ -93,6 +93,8 @@ struct QuestionRow {
     deleted_at_ms: Option<i64>,
     created_at_ms: i64,
     updated_at_ms: i64,
+    unit_id: Option<String>,
+    unit_name: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -148,6 +150,8 @@ struct DuplicateScanMetaRow {
     created_at_ms: i64,
     updated_at_ms: i64,
     similarity_length: i64,
+    unit_id: Option<String>,
+    unit_name: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -174,6 +178,7 @@ struct BatchQuestionRow {
     content_version: i64,
     last_used_at_ms: Option<i64>,
     deleted_at_ms: Option<i64>,
+    unit_id: Option<String>,
 }
 
 fn parse_rich(json: &str) -> CommandResult<RichContentApi> {
@@ -320,6 +325,8 @@ fn assemble_questions(
             chapter_id: row.chapter_id,
             subject_name: row.subject_name,
             chapter_name: row.chapter_name,
+            unit_id: row.unit_id,
+            unit_name: row.unit_name,
             tags: tags_by_question.remove(&id).unwrap_or_default(),
             resource_refs: resources_by_question.remove(&id).unwrap_or_default(),
             last_used_at: row.last_used_at_ms,
@@ -361,6 +368,12 @@ fn push_filters<'args>(
         builder
             .push(" AND q.subject_id = ")
             .push_bind(subject_id.clone());
+    }
+    if let Some(unit_id) = &filters.unit_id {
+        builder.push(" AND q.unit_id = ").push_bind(unit_id.clone());
+    }
+    if filters.unassigned_unit {
+        builder.push(" AND q.unit_id IS NULL");
     }
     if let Some(chapter_id) = &filters.chapter_id {
         builder
@@ -451,6 +464,8 @@ pub async fn list_question_summaries(
                 chapter_id: row.chapter_id,
                 subject_name: row.subject_name,
                 chapter_name: row.chapter_name,
+                unit_id: row.unit_id,
+                unit_name: row.unit_name,
                 last_used_at: row.last_used_at_ms,
                 deleted_at: row.deleted_at_ms,
                 created_at: row.created_at_ms,
@@ -505,8 +520,8 @@ async fn question_page(
         "q.stem_json, q.answer_json, q.explanation_json"
     };
     let mut rows_builder = QueryBuilder::<Sqlite>::new(format!(
-        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
-                s.name AS subject_name, c.name AS chapter_name, \
+        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, q.unit_id, \
+                s.name AS subject_name, c.name AS chapter_name, (SELECT name FROM units WHERE id=q.unit_id) AS unit_name, \
                 {content}, q.content_version, \
                 q.last_used_at_ms, q.deleted_at_ms, q.created_at_ms, q.updated_at_ms \
          FROM questions q \
@@ -549,8 +564,8 @@ pub(crate) async fn load_questions_by_ids(
         return Ok(Vec::new());
     }
     let mut builder = QueryBuilder::<Sqlite>::new(
-        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
-                s.name AS subject_name, c.name AS chapter_name, \
+        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, q.unit_id, \
+                s.name AS subject_name, c.name AS chapter_name, (SELECT name FROM units WHERE id=q.unit_id) AS unit_name, \
                 q.stem_json, q.answer_json, q.explanation_json, q.content_version, \
                 q.last_used_at_ms, q.deleted_at_ms, q.created_at_ms, q.updated_at_ms \
          FROM questions q JOIN subjects s ON s.id = q.subject_id \
@@ -595,8 +610,8 @@ pub(crate) async fn list_active_questions_for_export(
             .collect::<HashMap<_, _>>();
 
     let rows = sqlx::query_as::<_, QuestionRow>(
-        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
-                s.name AS subject_name, c.name AS chapter_name, \
+        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, q.unit_id, \
+                s.name AS subject_name, c.name AS chapter_name, (SELECT name FROM units WHERE id=q.unit_id) AS unit_name, \
                 q.stem_json, q.answer_json, q.explanation_json, q.content_version, \
                 q.last_used_at_ms, q.deleted_at_ms, q.created_at_ms, q.updated_at_ms \
          FROM questions q \
@@ -708,8 +723,8 @@ pub async fn get_question_stem_summaries(
 
 pub async fn get_question(pool: &SqlitePool, id: &str) -> CommandResult<Option<QuestionApi>> {
     let row = sqlx::query_as::<_, QuestionRow>(
-        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
-                s.name AS subject_name, c.name AS chapter_name, \
+        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, q.unit_id, \
+                s.name AS subject_name, c.name AS chapter_name, (SELECT name FROM units WHERE id=q.unit_id) AS unit_name, \
                 q.stem_json, q.answer_json, q.explanation_json, q.content_version, \
                 q.last_used_at_ms, q.deleted_at_ms, q.created_at_ms, q.updated_at_ms \
          FROM questions q JOIN subjects s ON s.id = q.subject_id \
@@ -1404,9 +1419,9 @@ pub async fn check_question_duplicates_batch(
     let field_limit = i64::try_from(MAX_SIMILARITY_FIELD_CHARS).unwrap_or(i64::MAX);
     let preview_limit = i64::try_from(DUPLICATE_STEM_PREVIEW_CHARS).unwrap_or(i64::MAX);
     let questions = sqlx::query_as::<_, DuplicateScanMetaRow>(
-        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
+        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, q.unit_id, \
                 substr(q.stem_plain, 1, ?) AS stem_preview, \
-                s.name AS subject_name, c.name AS chapter_name, CASE WHEN q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 THEN q.exact_fingerprint ELSE CAST(q.id AS BLOB) END AS exact_fingerprint, \
+                s.name AS subject_name, c.name AS chapter_name, (SELECT name FROM units WHERE id=q.unit_id) AS unit_name, CASE WHEN q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 THEN q.exact_fingerprint ELSE CAST(q.id AS BLOB) END AS exact_fingerprint, \
                 q.content_version, q.created_at_ms, q.updated_at_ms, \
                 min(length(q.stem_plain), ?) + min(length(q.options_plain), ?) + \
                 min(length(q.answer_plain), ?) AS similarity_length \
@@ -1618,6 +1633,8 @@ fn duplicate_scan_member(question: &DuplicateScanMetaRow) -> QuestionDuplicateMe
         chapter_id: question.chapter_id.clone(),
         subject_name: question.subject_name.clone(),
         chapter_name: question.chapter_name.clone(),
+        unit_id: question.unit_id.clone(),
+        unit_name: question.unit_name.clone(),
         content_version: question.content_version,
         created_at: question.created_at_ms,
         updated_at: question.updated_at_ms,
@@ -1742,9 +1759,9 @@ pub async fn scan_question_duplicates_with_cancel(
     let field_limit = i64::try_from(MAX_SIMILARITY_FIELD_CHARS).unwrap_or(i64::MAX);
     let preview_limit = i64::try_from(DUPLICATE_STEM_PREVIEW_CHARS).unwrap_or(i64::MAX);
     let questions = sqlx::query_as::<_, DuplicateScanMetaRow>(
-        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, \
+        "SELECT q.id, q.question_type, q.subject_id, q.chapter_id, q.unit_id, \
                 substr(q.stem_plain, 1, ?) AS stem_preview, \
-                s.name AS subject_name, c.name AS chapter_name, CASE WHEN q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 THEN q.exact_fingerprint ELSE CAST(q.id AS BLOB) END AS exact_fingerprint, \
+                s.name AS subject_name, c.name AS chapter_name, (SELECT name FROM units WHERE id=q.unit_id) AS unit_name, CASE WHEN q.fingerprint_version = 2 AND q.fingerprint_comparable = 1 THEN q.exact_fingerprint ELSE CAST(q.id AS BLOB) END AS exact_fingerprint, \
                 q.content_version, q.created_at_ms, q.updated_at_ms, \
                 min(length(q.stem_plain), ?) + min(length(q.options_plain), ?) + \
                 min(length(q.answer_plain), ?) AS similarity_length \
@@ -1765,6 +1782,11 @@ pub async fn scan_question_duplicates_with_cancel(
         .iter()
         .filter(|question| {
             question.subject_id == subject_id
+                && request
+                    .unit_id
+                    .as_ref()
+                    .is_none_or(|id| question.unit_id.as_ref() == Some(id))
+                && (!request.unassigned_unit || question.unit_id.is_none())
                 && chapter_id
                     .as_ref()
                     .is_none_or(|chapter_id| question.chapter_id == *chapter_id)
@@ -2061,6 +2083,9 @@ async fn save_question_in_connection(
         ));
     }
 
+    super::taxonomy::validate_unit(transaction, &draft.chapter_id, draft.unit_id.as_deref())
+        .await?;
+
     let mut tag_names = Vec::with_capacity(draft.tag_ids.len());
     for tag_id in &draft.tag_ids {
         let name = sqlx::query_scalar::<_, String>("SELECT name FROM tags WHERE id = ?")
@@ -2199,7 +2224,7 @@ async fn save_question_in_connection(
         }
         super::question_history::capture(transaction, &question_id).await?;
         let affected = sqlx::query(
-            "UPDATE questions SET question_type = ?, subject_id = ?, chapter_id = ?, content_schema_version = ?, \
+            "UPDATE questions SET question_type = ?, subject_id = ?, chapter_id = ?, unit_id = ?, content_schema_version = ?, \
              stem_json = ?, answer_json = ?, explanation_json = ?, stem_plain = ?, \
              options_plain = ?, answer_plain = ?, explanation_plain = ?, tags_plain = ?, \
              exact_fingerprint = ?, fingerprint_version = 2, fingerprint_comparable = ?, content_version = content_version + 1, updated_at_ms = ? \
@@ -2208,6 +2233,7 @@ async fn save_question_in_connection(
         .bind(&draft.question_type)
         .bind(&draft.subject_id)
         .bind(&draft.chapter_id)
+        .bind(&draft.unit_id)
         .bind(i64::from(content_schema_version))
         .bind(&stem_json)
         .bind(&answer_json)
@@ -2240,12 +2266,12 @@ async fn save_question_in_connection(
             ));
         }
         sqlx::query(
-            "INSERT INTO questions (id, question_type, subject_id, chapter_id, content_schema_version, \
+            "INSERT INTO questions (id, question_type, subject_id, chapter_id, unit_id, content_schema_version, \
              stem_json, answer_json, explanation_json, stem_plain, options_plain, answer_plain, \
              explanation_plain, tags_plain, fingerprint_version, exact_fingerprint, fingerprint_comparable, content_version, \
-             created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?, 1, ?, ?)",
+             created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 2, ?, ?, 1, ?, ?)",
         )
-        .bind(&question_id).bind(&draft.question_type).bind(&draft.subject_id).bind(&draft.chapter_id)
+        .bind(&question_id).bind(&draft.question_type).bind(&draft.subject_id).bind(&draft.chapter_id).bind(&draft.unit_id)
         .bind(i64::from(content_schema_version))
         .bind(&stem_json).bind(&answer_json).bind(&explanation_json)
         .bind(&draft.stem.plain_text).bind(&options_plain).bind(&draft.answer.plain_text)
@@ -2686,6 +2712,15 @@ pub async fn batch_edit_questions(
         }
     }
 
+    if let Some(classification) = &request.classification {
+        super::taxonomy::validate_unit(
+            &mut transaction,
+            &classification.chapter_id,
+            classification.unit_id.as_deref(),
+        )
+        .await?;
+    }
+
     for tag_id in &request.tag_operation.tag_ids {
         let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE id = ?")
             .bind(tag_id)
@@ -2705,7 +2740,7 @@ pub async fn batch_edit_questions(
     let mut rows = Vec::with_capacity(request.questions.len());
     for target in &request.questions {
         let row = sqlx::query_as::<_, BatchQuestionRow>(
-            "SELECT id, subject_id, chapter_id, content_version, last_used_at_ms, deleted_at_ms \
+            "SELECT id, subject_id, chapter_id, unit_id, content_version, last_used_at_ms, deleted_at_ms \
              FROM questions WHERE id = ?",
         )
         .bind(&target.id)
@@ -2808,6 +2843,11 @@ pub async fn batch_edit_questions(
             )));
         }
         let tags_plain = tag_names.join(" ");
+        let unit_id = request
+            .classification
+            .as_ref()
+            .map(|c| c.unit_id.as_deref())
+            .unwrap_or(row.unit_id.as_deref());
         let (subject_id, chapter_id) = request
             .classification
             .as_ref()
@@ -2824,12 +2864,13 @@ pub async fn batch_edit_questions(
             row.last_used_at_ms
         };
         let affected = sqlx::query(
-            "UPDATE questions SET subject_id = ?, chapter_id = ?, last_used_at_ms = ?, \
+            "UPDATE questions SET subject_id = ?, chapter_id = ?, unit_id = ?, last_used_at_ms = ?, \
              tags_plain = ?, content_version = content_version + 1, updated_at_ms = ? \
              WHERE id = ? AND content_version = ? AND deleted_at_ms IS NULL",
         )
         .bind(subject_id)
         .bind(chapter_id)
+        .bind(unit_id)
         .bind(last_used_at)
         .bind(tags_plain)
         .bind(now)
@@ -3042,6 +3083,7 @@ mod tests {
 
     fn draft(stem: &str, answer: &str) -> QuestionDraftApi {
         QuestionDraftApi {
+            unit_id: None,
             answer_review_required: false,
             id: None,
             question_id: None,
@@ -3262,6 +3304,284 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn manual_tag_filters_match_summary_and_full_pages_with_combined_scope() {
+        let root = test_root("manual-tag-filters");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "标签筛选", "第一章").await;
+        let (other_subject, other_chapter) =
+            insert_test_classification(pool, "其他学科", "第一章").await;
+        let first_tag = insert_test_tag(pool, "重点").await;
+        let second_tag = insert_test_tag(pool, "易错").await;
+        let mut saved = Vec::new();
+        for (index, selected_tags) in [
+            vec![first_tag.clone()],
+            vec![second_tag.clone()],
+            vec![first_tag.clone(), second_tag.clone()],
+            vec![first_tag.clone(), second_tag.clone()],
+            vec![first_tag.clone(), second_tag.clone()],
+            vec![],
+            vec![first_tag.clone(), second_tag.clone()],
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut value = draft(&format!("标签候选{index}"), "测试答案");
+            value.subject_id = subject.clone();
+            value.chapter_id = chapter.clone();
+            value.tag_ids = selected_tags;
+            if index == 3 {
+                value.question_type = "fill_blank".to_owned();
+            }
+            if index == 4 {
+                value.subject_id = other_subject.clone();
+                value.chapter_id = other_chapter.clone();
+            }
+            saved.push(save_question(pool, &value, "test").await.unwrap());
+        }
+        sqlx::query("UPDATE questions SET deleted_at_ms = ? WHERE id = ?")
+            .bind(now_millis())
+            .bind(&saved[6].id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut filters: QuestionFiltersApi = serde_json::from_value(serde_json::json!({
+            "keyword": "", "tagIds": [first_tag, second_tag], "tagMatchMode": "all",
+            "usage": "all", "deleted": false, "page": 1, "pageSize": 100
+        }))
+        .unwrap();
+        for (mode, expected) in [("all", vec![2, 3, 4]), ("any", vec![0, 1, 2, 3, 4])] {
+            filters.tag_match_mode = mode.to_owned();
+            let summary = list_question_summaries(pool, &filters).await.unwrap();
+            let full = list_questions(pool, &filters).await.unwrap();
+            let expected_ids: HashSet<_> = expected.iter().map(|i| saved[*i].id.clone()).collect();
+            assert_eq!(summary.total as usize, expected_ids.len());
+            assert_eq!(full.total, summary.total);
+            assert_eq!(
+                summary
+                    .items
+                    .iter()
+                    .map(|q| q.id.clone())
+                    .collect::<HashSet<_>>(),
+                expected_ids
+            );
+            assert_eq!(
+                full.items
+                    .iter()
+                    .map(|q| q.id.clone())
+                    .collect::<HashSet<_>>(),
+                expected_ids
+            );
+            for item in &summary.items {
+                let original = saved.iter().find(|q| q.id == item.id).unwrap();
+                assert_eq!(item.tags.len(), original.tags.len());
+            }
+        }
+        filters.subject_id = Some(subject);
+        filters.chapter_id = Some(chapter);
+        filters.page_size = 2;
+        let first_page = list_question_summaries(pool, &filters).await.unwrap();
+        filters.page = 2;
+        let second_page = list_question_summaries(pool, &filters).await.unwrap();
+        assert_eq!(first_page.total, 4);
+        assert_eq!(second_page.total, 4);
+        assert_eq!(first_page.items.len(), 2);
+        assert_eq!(second_page.items.len(), 2);
+        assert_eq!(
+            first_page
+                .items
+                .iter()
+                .chain(&second_page.items)
+                .map(|q| &q.id)
+                .collect::<HashSet<_>>()
+                .len(),
+            4
+        );
+
+        filters.page = 1;
+        filters.keyword = "标签候选".to_owned();
+        filters.question_type = Some("short_answer".to_owned());
+        filters.tag_match_mode = "all".to_owned();
+        let combined = list_question_summaries(pool, &filters).await.unwrap();
+        assert_eq!(combined.total, 1);
+        assert_eq!(combined.items[0].id, saved[2].id);
+        filters.tag_ids.truncate(1);
+        assert_eq!(
+            list_question_summaries(pool, &filters).await.unwrap().total,
+            2
+        );
+        filters.tag_ids.clear();
+        assert_eq!(
+            list_question_summaries(pool, &filters).await.unwrap().total,
+            4
+        );
+        database.close().await;
+        drop(database);
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn optional_units_preserve_scope_history_and_atomic_classification() {
+        let root = test_root("optional-units");
+        let database = Database::open(&root, "test").await.unwrap();
+        let pool = database.pool();
+        let (subject, chapter) = insert_test_classification(pool, "单元学科", "章节一").await;
+        let (_, other_chapter) = insert_test_classification(pool, "其他学科", "章节二").await;
+        let unit = super::super::taxonomy::create_unit(pool, &chapter, "第一单元", "test")
+            .await
+            .unwrap();
+        let other_unit =
+            super::super::taxonomy::create_unit(pool, &other_chapter, "第一单元", "test")
+                .await
+                .unwrap();
+        assert!(
+            super::super::taxonomy::create_unit(pool, &chapter, " 第一单元 ", "test")
+                .await
+                .is_err()
+        );
+        let tag = insert_test_tag(pool, "单元重点").await;
+        let mut value = draft("单元候选", "答案");
+        value.subject_id = subject.clone();
+        value.chapter_id = chapter.clone();
+        value.tag_ids = vec![tag.clone()];
+        let unassigned = save_question(pool, &value, "test").await.unwrap();
+        value.unit_id = Some(unit.clone());
+        let assigned = save_question(pool, &value, "test").await.unwrap();
+        assert_eq!(assigned.unit_name.as_deref(), Some("第一单元"));
+
+        value.unit_id = Some(other_unit.clone());
+        assert!(save_question(pool, &value, "test").await.is_err());
+        assert!(
+            sqlx::query("UPDATE questions SET unit_id=? WHERE id=?")
+                .bind(&other_unit)
+                .bind(&unassigned.id)
+                .execute(pool)
+                .await
+                .is_err()
+        );
+        let mut filters: QuestionFiltersApi = serde_json::from_value(serde_json::json!({
+            "keyword":"单元候选", "subjectId":subject, "chapterId":chapter,
+            "unitId":unit, "tagIds":[tag], "type":"short_answer", "deleted":false
+        }))
+        .unwrap();
+        let summary = list_question_summaries(pool, &filters).await.unwrap();
+        let full = list_questions(pool, &filters).await.unwrap();
+        assert_eq!(summary.total, 1);
+        assert_eq!(summary.items[0].id, assigned.id);
+        assert_eq!(full.items[0].unit_id, Some(unit.clone()));
+        filters.unit_id = None;
+        filters.unassigned_unit = true;
+        assert_eq!(
+            list_questions(pool, &filters).await.unwrap().items[0].id,
+            unassigned.id
+        );
+        filters.unassigned_unit = false;
+        assert_eq!(list_questions(pool, &filters).await.unwrap().total, 2);
+
+        let scope = serde_json::from_value(
+            serde_json::json!({ "subjectIds":[subject], "chapterIds":[chapter], "unitIds":[unit] }),
+        )
+        .unwrap();
+        assert_eq!(
+            super::super::random_draw::analyze(pool, &scope)
+                .await
+                .unwrap()
+                .available_total,
+            1
+        );
+        let snapshot = serde_json::to_value(&assigned).unwrap();
+        super::super::taxonomy::update_unit(pool, &unit, "重命名单元", "test")
+            .await
+            .unwrap();
+        assert_eq!(
+            get_question(pool, &assigned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unit_name
+                .as_deref(),
+            Some("重命名单元")
+        );
+        assert_eq!(
+            serde_json::from_value::<QuestionApi>(snapshot)
+                .unwrap()
+                .unit_name
+                .as_deref(),
+            Some("第一单元")
+        );
+
+        let request: QuestionBatchEditRequestApi = serde_json::from_value(serde_json::json!({
+            "questions":[{"id":assigned.id,"expectedContentVersion":1}],
+            "classification":{"subjectId":subject,"chapterId":chapter,"unitId":null},
+            "usageOperation":"keep","tagOperation":{"mode":"keep","tagIds":[]}
+        }))
+        .unwrap();
+        batch_edit_questions(pool, &request, "test").await.unwrap();
+        assert!(
+            get_question(pool, &assigned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unit_id
+                .is_none()
+        );
+        let history = super::super::question_history::list(pool, &assigned.id)
+            .await
+            .unwrap();
+        let old = history
+            .iter()
+            .find(|item| item["contentVersion"] == 1)
+            .unwrap();
+        assert_eq!(
+            super::super::question_history::detail(pool, old["id"].as_str().unwrap())
+                .await
+                .unwrap()
+                .unit_id
+                .as_deref(),
+            Some(unit.as_str())
+        );
+        let batches = super::super::question_history::batches(pool).await.unwrap();
+        super::super::question_history::undo(pool, batches[0]["id"].as_str().unwrap(), "test")
+            .await
+            .unwrap();
+        assert_eq!(
+            get_question(pool, &assigned.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .unit_id
+                .as_deref(),
+            Some(unit.as_str())
+        );
+        assert!(
+            super::super::taxonomy::delete_unit(pool, &unit, "test")
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE questions SET deleted_at_ms=1 WHERE id=?")
+            .bind(&assigned.id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            super::super::taxonomy::delete_unit(pool, &unit, "test")
+                .await
+                .is_err()
+        );
+        assert!(
+            super::super::taxonomy::delete_chapter(pool, &other_chapter, "test")
+                .await
+                .is_err()
+        );
+        super::super::taxonomy::delete_unit(pool, &other_unit, "test")
+            .await
+            .unwrap();
+        database.close().await;
+        drop(database);
+        remove_test_root(&root);
+    }
+
+    #[tokio::test]
     async fn question_summaries_keep_formula_html_and_details_load_in_requested_order() {
         let root = test_root("question-summary-contract");
         let database = Database::open(&root, "test").await.unwrap();
@@ -3300,6 +3620,8 @@ mod tests {
         let scan_id = Uuid::now_v7().to_string();
         cancel_question_duplicate_scan(&scan_id).unwrap();
         let request = QuestionDuplicateScanRequestApi {
+            unassigned_unit: false,
+            unit_id: None,
             subject_id: first.subject_id.clone(),
             chapter_id: None,
         };
@@ -3897,6 +4219,7 @@ mod tests {
         save_question(pool, &shared_draft, "test").await.unwrap();
 
         let scope = super::super::models::RandomDrawScopeApi {
+            unit_ids: Vec::new(),
             subject_ids: vec![subject_id],
             chapter_ids: vec![chapter_id],
             tag_ids: vec![first_tag, second_tag],
@@ -3957,6 +4280,7 @@ mod tests {
         save_question(pool, &second_draft, "test").await.unwrap();
 
         let combined_scope = super::super::models::RandomDrawScopeApi {
+            unit_ids: Vec::new(),
             subject_ids: vec![first_subject.clone(), second_subject.clone()],
             chapter_ids: vec![],
             tag_ids: vec![],
@@ -4021,6 +4345,7 @@ mod tests {
             .unwrap();
 
         let mut scope = super::super::models::RandomDrawScopeApi {
+            unit_ids: Vec::new(),
             subject_ids: vec![subject_id.clone()],
             chapter_ids: vec![chapter_id.clone()],
             tag_ids: vec![],
@@ -4059,6 +4384,8 @@ mod tests {
             let question_bank_total = list_questions(
                 pool,
                 &QuestionFiltersApi {
+                    unassigned_unit: false,
+                    unit_id: None,
                     keyword: String::new(),
                     subject_id: Some(subject_id.clone()),
                     chapter_id: Some(chapter_id.clone()),
@@ -4130,6 +4457,7 @@ mod tests {
                 },
             ],
             classification: Some(super::super::models::QuestionBatchClassificationApi {
+                unit_id: None,
                 subject_id: new_subject.clone(),
                 chapter_id: new_chapter.clone(),
             }),
@@ -4529,12 +4857,16 @@ mod tests {
             .unwrap();
 
         let request = QuestionDuplicateScanRequestApi {
+            unassigned_unit: false,
+            unit_id: None,
             subject_id: scope_subject,
             chapter_id: Some(scope_chapter),
         };
         let missing_scope_error = scan_question_duplicates(
             pool,
             &QuestionDuplicateScanRequestApi {
+                unassigned_unit: false,
+                unit_id: None,
                 subject_id: Uuid::now_v7().to_string(),
                 chapter_id: None,
             },

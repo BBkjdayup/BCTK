@@ -132,7 +132,7 @@ export const backend = {
     const page = await previewCall('listQuestions', filters)
     return { ...page, items: page.items.map(q => ({
       id: q.id, type: q.type, stem: { schemaVersion: 1, html: q.stem.html, plainText: q.stem.plainText },
-      subjectId: q.subjectId, chapterId: q.chapterId, subjectName: q.subjectName, chapterName: q.chapterName,
+      subjectId: q.subjectId, chapterId: q.chapterId, subjectName: q.subjectName, chapterName: q.chapterName, unitId: q.unitId, unitName: q.unitName,
       tags: q.tags, lastUsedAt: q.lastUsedAt, deletedAt: q.deletedAt, createdAt: q.createdAt, updatedAt: q.updatedAt, contentVersion: q.contentVersion,
     })) }
   },
@@ -560,6 +560,20 @@ export const backend = {
     return isTauriRuntime() ? call('delete_chapter', { id }) : previewCall('deleteChapter', id)
   },
 
+  createUnit(chapterId: string, name: string): Promise<string> {
+    return isTauriRuntime()
+      ? call('create_unit', { chapterId, name })
+      : previewCall('createUnit', chapterId, name)
+  },
+
+  updateUnit(id: string, name: string): Promise<void> {
+    return isTauriRuntime() ? call('update_unit', { id, name }) : previewCall('updateUnit', id, name)
+  },
+
+  deleteUnit(id: string): Promise<void> {
+    return isTauriRuntime() ? call('delete_unit', { id }) : previewCall('deleteUnit', id)
+  },
+
   createTag(name: string): Promise<string> {
     return isTauriRuntime() ? call('create_tag', { name }) : previewCall('createTag', name)
   },
@@ -580,6 +594,11 @@ export const backend = {
     return isTauriRuntime()
       ? call('save_chapter_order', { subjectId, items })
       : previewCall('saveChapterOrder', subjectId, items)
+  },
+  saveUnitOrder(chapterId: string, items: TaxonomyOrderItem[]): Promise<void> {
+    return isTauriRuntime()
+      ? call('save_unit_order', { chapterId, items })
+      : previewCall('saveUnitOrder', chapterId, items)
   },
 
   backgroundTaskProgress(taskId: string): Promise<{ phase: string; completed: number; total: number | null; cancellable: boolean; cancelled: boolean; finished: boolean }> {

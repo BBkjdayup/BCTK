@@ -1,7 +1,7 @@
 {
   "name": "zhitiku-desktop",
   "private": true,
-  "version": "0.1.105",
+  "version": "0.1.107",
   "type": "module",
   "scripts": {
     "predev": "pnpm version:check",

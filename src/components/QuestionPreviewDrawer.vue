@@ -56,7 +56,7 @@ const title = computed(() => props.question ? questionTypeLabel(props.question.t
         <h3>解析</h3>
         <RichContentView class="rich-display" :content="question.explanation" />
       </section>
-      <div class="preview-path">{{ question.subjectName }} · {{ question.chapterName }}</div>
+      <div class="preview-path">{{ question.subjectName }} · {{ question.chapterName }} · {{ question.unitName || '未分单元' }}</div>
     </template>
     <template #footer>
       <div class="drawer-footer">

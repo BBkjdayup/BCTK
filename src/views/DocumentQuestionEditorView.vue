@@ -476,6 +476,7 @@ function buildReviewItems(
     appStore.subjects,
     bankStore.filters.subjectId,
     bankStore.filters.chapterId,
+    bankStore.filters.unitId,
   )
   return result.questions.map((question) => {
     const hasError = question.issues.some((issue) => issue.severity === 'error')
@@ -488,6 +489,7 @@ function buildReviewItems(
       explanation: clonePlain(question.draft.explanation),
       subjectId: classification.subject?.id ?? '',
       chapterId: classification.chapter?.id ?? '',
+      unitId: classification.unit?.id,
       tagIds: [],
       resourceRefs: [],
     }

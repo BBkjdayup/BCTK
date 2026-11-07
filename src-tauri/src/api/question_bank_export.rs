@@ -278,6 +278,7 @@ pub(super) fn write_xlsx_archive(
         "创建时间",
         "更新时间",
         "题目ID",
+        "单元",
     ];
     let last_row = questions.len() + 1;
 
@@ -316,8 +317,8 @@ pub(super) fn write_xlsx_archive(
     let prefix = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
          <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\n\
-         <dimension ref=\"A1:M{last_row}\"/><sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews>\n\
-         <cols><col min=\"1\" max=\"1\" width=\"8\" customWidth=\"1\"/><col min=\"2\" max=\"4\" width=\"18\" customWidth=\"1\"/><col min=\"5\" max=\"8\" width=\"42\" customWidth=\"1\"/><col min=\"9\" max=\"9\" width=\"22\" customWidth=\"1\"/><col min=\"10\" max=\"12\" width=\"20\" customWidth=\"1\"/><col min=\"13\" max=\"13\" width=\"38\" customWidth=\"1\"/></cols><sheetData>"
+         <dimension ref=\"A1:N{last_row}\"/><sheetViews><sheetView workbookViewId=\"0\"><pane ySplit=\"1\" topLeftCell=\"A2\" activePane=\"bottomLeft\" state=\"frozen\"/></sheetView></sheetViews>\n\
+         <cols><col min=\"1\" max=\"1\" width=\"8\" customWidth=\"1\"/><col min=\"2\" max=\"4\" width=\"18\" customWidth=\"1\"/><col min=\"5\" max=\"8\" width=\"42\" customWidth=\"1\"/><col min=\"9\" max=\"9\" width=\"22\" customWidth=\"1\"/><col min=\"10\" max=\"12\" width=\"20\" customWidth=\"1\"/><col min=\"13\" max=\"13\" width=\"38\" customWidth=\"1\"/><col min=\"14\" max=\"14\" width=\"20\" customWidth=\"1\"/></cols><sheetData>"
     );
     write_xlsx_chunk(&mut writer, prefix.as_bytes(), limit)?;
 
@@ -369,6 +370,7 @@ pub(super) fn write_xlsx_archive(
             format_unix_millis(question.created_at),
             format_unix_millis(question.updated_at),
             question.id.clone(),
+            question.unit_name.clone().unwrap_or_default(),
         ];
         row_xml.clear();
         row_xml.push_str(&format!("<row r=\"{row}\">"));
@@ -379,7 +381,7 @@ pub(super) fn write_xlsx_archive(
         write_xlsx_chunk(&mut writer, row_xml.as_bytes(), limit)?;
     }
     let suffix = format!(
-        "</sheetData><autoFilter ref=\"A1:M{last_row}\"/><pageMargins left=\"0.3\" right=\"0.3\" top=\"0.5\" bottom=\"0.5\" header=\"0.2\" footer=\"0.2\"/></worksheet>"
+        "</sheetData><autoFilter ref=\"A1:N{last_row}\"/><pageMargins left=\"0.3\" right=\"0.3\" top=\"0.5\" bottom=\"0.5\" header=\"0.2\" footer=\"0.2\"/></worksheet>"
     );
     write_xlsx_chunk(&mut writer, suffix.as_bytes(), limit)?;
 
@@ -568,6 +570,8 @@ mod tests {
 
     fn question() -> QuestionApi {
         QuestionApi {
+            unit_id: None,
+            unit_name: None,
             id: "00000000-0000-7000-8000-000000000001".to_owned(),
             question_type: "single_choice".to_owned(),
             question_type_name: Some("单选题".to_owned()),
@@ -718,6 +722,7 @@ mod tests {
         questions::save_question(
             database.pool(),
             &QuestionDraftApi {
+                unit_id: None,
                 answer_review_required: false,
                 id: None,
                 question_id: None,

@@ -1058,6 +1058,99 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn v25_optional_units_upgrade_preserves_questions_and_retains_original() {
+        let root = test_root("v25-optional-units");
+        let paths = DatabasePaths::new(&root);
+        paths.prepare().unwrap();
+        let mut connection = connect_connection(paths.database_file(), true)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA application_id = 1515473749")
+            .execute(&mut connection)
+            .await
+            .unwrap();
+        connection.ensure_migrations_table().await.unwrap();
+        for migration in MIGRATOR.iter().filter(|migration| migration.version <= 25) {
+            connection.apply(migration).await.unwrap();
+        }
+        let identity = uuid::Uuid::now_v7().to_string();
+        let subject = uuid::Uuid::now_v7().to_string();
+        let chapter = uuid::Uuid::now_v7().to_string();
+        let question = uuid::Uuid::now_v7().to_string();
+        sqlx::query("INSERT INTO app_meta(singleton_id,database_uuid,created_by_app_version,created_at_ms) VALUES(1,?,'0.1.105',1)").bind(&identity).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO subjects(id,name,name_key,created_at_ms,updated_at_ms) VALUES(?,'旧科目','旧科目',1,1)").bind(&subject).execute(&mut connection).await.unwrap();
+        sqlx::query("INSERT INTO chapters(id,subject_id,name,name_key,created_at_ms,updated_at_ms) VALUES(?,?,'旧章节','旧章节',1,1)").bind(&chapter).bind(&subject).execute(&mut connection).await.unwrap();
+        let rich =
+            serde_json::json!({"schemaVersion":1,"html":"<p>原有内容</p>","plainText":"原有内容"})
+                .to_string();
+        sqlx::query("INSERT INTO questions(id,question_type,subject_id,chapter_id,stem_json,answer_json,explanation_json,stem_plain,answer_plain,exact_fingerprint,fingerprint_version,fingerprint_comparable,content_version,created_at_ms,updated_at_ms) VALUES(?,'short_answer',?,?,?,?,?,'原有内容','原有内容',zeroblob(32),2,1,7,11,22)")
+            .bind(&question).bind(&subject).bind(&chapter).bind(&rich).bind(&rich).bind(&rich).execute(&mut connection).await.unwrap();
+        connection.close().await.unwrap();
+
+        let database = Database::open(&root, "unit-test").await.unwrap();
+        let row: (String, String, String, i64, i64, i64, Option<String>) = sqlx::query_as("SELECT subject_id,chapter_id,stem_json,content_version,created_at_ms,updated_at_ms,unit_id FROM questions WHERE id=?")
+            .bind(&question).fetch_one(database.pool()).await.unwrap();
+        assert_eq!(row, (subject, chapter, rich, 7, 11, 22, None));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT database_uuid FROM app_meta")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            identity
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM units")
+                .fetch_one(database.pool())
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(
+            sqlx::query("PRAGMA foreign_key_check")
+                .fetch_all(database.pool())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let original = fs::read_dir(paths.backup_dir())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("zhitiku-pre-migration-")
+            })
+            .unwrap()
+            .path();
+        let mut original_connection = connect_connection(&original, false).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT MAX(version) FROM _sqlx_migrations")
+                .fetch_one(&mut original_connection)
+                .await
+                .unwrap(),
+            25
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM questions")
+                .fetch_one(&mut original_connection)
+                .await
+                .unwrap(),
+            1
+        );
+        original_connection.close().await.unwrap();
+        database.close().await;
+        drop(database);
+        for attempt in 0..10 {
+            match fs::remove_dir_all(&root) {
+                Ok(()) => break,
+                Err(_) if attempt < 9 => std::thread::sleep(std::time::Duration::from_millis(100)),
+                Err(error) => panic!("unit migration test cleanup failed: {error}"),
+            }
+        }
+    }
+
     #[test]
     fn published_v15_checksum_stays_immutable() {
         const PUBLISHED_V15_CHECKSUM: &[u8] = &[

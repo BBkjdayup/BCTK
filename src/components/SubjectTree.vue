@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Search, ArrowDown, ArrowRight, Setting, Download, PriceTag, Delete, Tickets } from '@element-plus/icons-vue'
@@ -7,19 +7,21 @@ import AppContextMenu from './AppContextMenu.vue'
 import { useAppStore } from '../stores/app'
 import { errorMessage } from '../services/errors'
 import { askForName, normalizeName } from '../utils/taxonomyNamePrompt'
-import type { Chapter, Subject } from '../types/domain'
+import type { Chapter, Subject, Unit } from '../types/domain'
 import type { ContextMenuItem } from '../types/contextMenu'
 
 const props = withDefaults(defineProps<{
   selectedSubjectId?: string
   selectedChapterId?: string
+  selectedUnitId?: string | null
+  unassignedUnit?: boolean
   title?: string
 }>(), {
-  title: '学科与章节',
+  title: '题目分类',
 })
 
 const emit = defineEmits<{
-  select: [payload: { subjectId?: string; chapterId?: string }]
+  select: [payload: { subjectId?: string; chapterId?: string; unitId?: string; unassignedUnit?: boolean }]
 }>()
 
 const route = useRoute()
@@ -33,17 +35,67 @@ const contextMenuY = ref(0)
 const contextMenuItems = ref<ContextMenuItem[]>([])
 const contextSubject = ref<Subject>()
 const contextChapter = ref<Chapter>()
+const contextUnit = ref<Unit>()
+
+watch(() => [props.selectedSubjectId, props.selectedChapterId, props.selectedUnitId, props.unassignedUnit], () => {
+  if (props.selectedUnitId || props.unassignedUnit) {
+    expanded.value = new Set([...expanded.value, ...[props.selectedSubjectId, props.selectedChapterId].filter((id): id is string => Boolean(id))])
+  }
+}, { immediate: true })
 
 const visibleSubjects = computed(() => {
   const value = keyword.value.trim().toLocaleLowerCase('zh-CN')
   if (!value) return appStore.subjects
-  return appStore.subjects
-    .map((subject) => ({
-      ...subject,
-      chapters: subject.chapters.filter((chapter) => chapter.name.toLocaleLowerCase('zh-CN').includes(value)),
-    }))
-    .filter((subject) => subject.name.toLocaleLowerCase('zh-CN').includes(value) || subject.chapters.length)
+  return appStore.subjects.map((subject) => {
+    if (subject.name.toLocaleLowerCase('zh-CN').includes(value)) return subject
+    return { ...subject, chapters: subject.chapters.flatMap((chapter) => {
+      if (chapter.name.toLocaleLowerCase('zh-CN').includes(value)) return [chapter]
+      const units = chapter.units?.filter((unit) => unit.name.toLocaleLowerCase('zh-CN').includes(value)) ?? []
+      return units.length ? [{ ...chapter, units }] : []
+    }) }
+  }).filter((subject) => subject.chapters.length || subject.name.toLocaleLowerCase('zh-CN').includes(value))
 })
+
+function isExpanded(id: string) { return Boolean(keyword.value.trim()) || expanded.value.has(id) }
+function unassignedCount(chapter: Chapter) {
+  const original = appStore.subjects.flatMap((subject) => subject.chapters).find((item) => item.id === chapter.id) ?? chapter
+  return Math.max(0, original.questionCount - (original.units ?? []).reduce((sum, unit) => sum + unit.questionCount, 0))
+}
+async function createUnit(chapter: Chapter) {
+  const name = await askForName(`在“${chapter.name}”中新增单元`)
+  if (!name) return
+  try {
+    await appStore.createUnit(chapter.id, name)
+    expanded.value = new Set([...expanded.value, chapter.subjectId, chapter.id])
+    ElMessage.success('单元已新增')
+  } catch (reason) { ElMessage.error(errorMessage(reason, '新增单元失败')) }
+}
+async function renameUnit(unit: Unit) {
+  const name = await askForName('重命名单元', unit.name)
+  if (!name || normalizeName(name) === normalizeName(unit.name)) return
+  try { await appStore.updateUnit(unit.id, name); ElMessage.success('单元名称已更新') }
+  catch (reason) { ElMessage.error(errorMessage(reason, '更新单元失败')) }
+}
+async function deleteUnit(unit: Unit) {
+  if (unit.questionCount) return
+  try { await ElMessageBox.confirm(`确定删除单元“${unit.name}”吗？`, '删除单元', { type: 'warning' }) }
+  catch { return }
+  try { await appStore.deleteUnit(unit.id); ElMessage.success('单元已删除') }
+  catch (reason) { ElMessage.error(errorMessage(reason, '删除单元失败')) }
+}
+function openUnitContextMenu(event: MouseEvent, subject: Subject, chapter: Chapter, unit: Unit) {
+  openChapterContextMenu(event, subject, chapter)
+  contextUnit.value = unit
+  contextMenuItems.value = [
+    { id: 'new-question', label: '在该单元新增题目' },
+    { id: 'word-import', label: '批量导入到该单元' },
+    { id: 'duplicate-check', label: '检查本单元重复题', disabled: !unit.questionCount },
+    { id: 'view', label: '查看本单元题目' },
+    { id: 'rename', label: '重命名单元' },
+    { id: 'manage-order', label: '管理单元顺序' },
+    { id: 'delete', label: '删除单元', danger: true, disabled: Boolean(unit.questionCount), hint: unit.questionCount ? '请先移走题目' : undefined },
+  ]
+}
 
 function toggle(subjectId: string) {
   const next = new Set(expanded.value)
@@ -53,7 +105,7 @@ function toggle(subjectId: string) {
 }
 
 function expandAll() {
-  expanded.value = new Set(appStore.subjects.map((subject) => subject.id))
+  expanded.value = new Set(appStore.subjects.flatMap((subject) => [subject.id, ...subject.chapters.map((chapter) => chapter.id)]))
 }
 
 function collapseAll() {
@@ -126,7 +178,7 @@ async function deleteSubject(subject: Subject) {
 }
 
 async function deleteChapter(chapter: Chapter) {
-  if (chapter.questionCount) return
+  if (chapter.questionCount || chapter.units?.length) return
   try {
     await ElMessageBox.confirm(`确定删除章节“${chapter.name}”吗？`, '删除章节', {
       type: 'warning',
@@ -146,6 +198,7 @@ async function deleteChapter(chapter: Chapter) {
 
 function openSubjectContextMenu(event: MouseEvent, subject: Subject) {
   event.preventDefault()
+  contextUnit.value = undefined
   contextSubject.value = subject
   contextChapter.value = undefined
   const hasNoChapter = subject.chapters.length === 0
@@ -170,7 +223,7 @@ function openSubjectContextMenu(event: MouseEvent, subject: Subject) {
       hint: subject.questionCount === 0 ? '该学科还没有题目' : undefined,
     },
     { id: 'rename', label: '重命名学科' },
-    { id: 'manage-order', label: '管理学科与章节顺序' },
+    { id: 'manage-order', label: '管理学科、章节与单元顺序' },
     {
       id: 'delete',
       label: '删除学科',
@@ -186,6 +239,7 @@ function openSubjectContextMenu(event: MouseEvent, subject: Subject) {
 
 function openChapterContextMenu(event: MouseEvent, subject: Subject, chapter: Chapter) {
   event.preventDefault()
+  contextUnit.value = undefined
   contextSubject.value = subject
   contextChapter.value = chapter
   contextMenuItems.value = [
@@ -198,14 +252,15 @@ function openChapterContextMenu(event: MouseEvent, subject: Subject, chapter: Ch
       hint: chapter.questionCount === 0 ? '该章节还没有题目' : undefined,
     },
     { id: 'view', label: '查看本章节题目' },
+    { id: 'new-unit', label: '新建单元' },
     { id: 'rename', label: '重命名章节' },
     { id: 'manage-order', label: '管理章节顺序' },
     {
       id: 'delete',
       label: '删除章节',
       danger: true,
-      disabled: chapter.questionCount > 0,
-      hint: chapter.questionCount ? `请先移走其中 ${chapter.questionCount} 道题` : undefined,
+      disabled: chapter.questionCount > 0 || Boolean(chapter.units?.length),
+      hint: chapter.questionCount ? `请先移走其中 ${chapter.questionCount} 道题` : chapter.units?.length ? '请先删除空单元' : undefined,
     },
   ]
   contextMenuX.value = event.clientX
@@ -216,18 +271,19 @@ function openChapterContextMenu(event: MouseEvent, subject: Subject, chapter: Ch
 function handleContextMenu(item: ContextMenuItem) {
   const subject = contextSubject.value
   const chapter = contextChapter.value
+  const unit = contextUnit.value
   if (!subject) return
   const defaultChapter = chapter ?? subject.chapters[0]
   if (item.id === 'new-question' && defaultChapter) {
     void router.push({
       path: '/questions/new',
-      query: { subjectId: subject.id, chapterId: defaultChapter.id },
+      query: { subjectId: subject.id, chapterId: defaultChapter.id, ...(unit ? { unitId: unit.id } : {}) },
     })
   }
   if (item.id === 'word-import' && defaultChapter) {
     void router.push({
       path: '/word-import',
-      query: { subjectId: subject.id, chapterId: defaultChapter.id },
+      query: { subjectId: subject.id, chapterId: defaultChapter.id, ...(unit ? { unitId: unit.id } : {}) },
     })
   }
   if (item.id === 'duplicate-check') {
@@ -236,18 +292,22 @@ function handleContextMenu(item: ContextMenuItem) {
       query: {
         subjectId: subject.id,
         ...(chapter ? { chapterId: chapter.id } : {}),
+        ...(unit ? { unitId: unit.id } : {}),
       },
     })
   }
+  if (item.id === 'new-unit' && chapter) void createUnit(chapter)
   if (item.id === 'new-chapter') void createChapter(subject)
-  if (item.id === 'view' && chapter) emit('select', { subjectId: subject.id, chapterId: chapter.id })
+  if (item.id === 'view' && chapter) emit('select', { subjectId: subject.id, chapterId: chapter.id, unitId: unit?.id })
   if (item.id === 'rename') {
-    if (chapter) void renameChapter(subject, chapter)
+    if (unit) void renameUnit(unit)
+    else if (chapter) void renameChapter(subject, chapter)
     else void renameSubject(subject)
   }
   if (item.id === 'manage-order') void router.push('/taxonomy')
   if (item.id === 'delete') {
-    if (chapter) void deleteChapter(chapter)
+    if (unit) void deleteUnit(unit)
+    else if (chapter) void deleteChapter(chapter)
     else void deleteSubject(subject)
   }
 }
@@ -263,15 +323,15 @@ function handleContextMenu(item: ContextMenuItem) {
         text
         circle
         size="small"
-        title="管理学科与章节"
-        aria-label="管理学科与章节"
+        title="管理学科、章节与单元"
+        aria-label="管理学科、章节与单元"
         @click="router.push('/taxonomy')"
       >
         <el-icon><Setting /></el-icon>
       </el-button>
     </div>
     <div class="subject-tree__search">
-      <el-input v-model="keyword" size="small" clearable placeholder="搜索学科或章节">
+      <el-input v-model="keyword" size="small" clearable placeholder="搜索学科、章节或单元">
         <template #prefix><el-icon><Search /></el-icon></template>
       </el-input>
     </div>
@@ -298,23 +358,29 @@ function handleContextMenu(item: ContextMenuItem) {
           @contextmenu.stop="openSubjectContextMenu($event, subject)"
         >
           <button class="tree-toggle" :aria-label="expanded.has(subject.id) ? '收起' : '展开'" @click="toggle(subject.id)">
-            <el-icon><ArrowDown v-if="expanded.has(subject.id)" /><ArrowRight v-else /></el-icon>
+            <el-icon><ArrowDown v-if="isExpanded(subject.id)" /><ArrowRight v-else /></el-icon>
           </button>
           <button class="tree-label" @click="emit('select', { subjectId: subject.id })">{{ subject.name }}</button>
           <span class="tree-count">{{ subject.questionCount }}</span>
         </div>
-        <div v-if="expanded.has(subject.id)" class="tree-children">
-          <button
-            v-for="chapter in subject.chapters"
-            :key="chapter.id"
-            class="tree-row tree-row--chapter"
-            :class="{ 'is-active': props.selectedChapterId === chapter.id }"
-            @click="emit('select', { subjectId: subject.id, chapterId: chapter.id })"
-            @contextmenu.stop="openChapterContextMenu($event, subject, chapter)"
-          >
-            <span class="tree-label">{{ chapter.name }}</span>
-            <span class="tree-count">{{ chapter.questionCount }}</span>
-          </button>
+        <div v-if="isExpanded(subject.id)" class="tree-children">
+          <div v-for="chapter in subject.chapters" :key="chapter.id">
+            <div class="tree-row tree-row--chapter" :class="{ 'is-active': props.selectedChapterId === chapter.id && !props.selectedUnitId && !props.unassignedUnit }" @contextmenu.stop="openChapterContextMenu($event, subject, chapter)">
+              <button class="tree-toggle" :aria-label="isExpanded(chapter.id) ? '收起章节' : '展开章节'" @click="toggle(chapter.id)">
+                <el-icon><ArrowDown v-if="isExpanded(chapter.id)" /><ArrowRight v-else /></el-icon>
+              </button>
+              <button class="tree-label" :title="chapter.name" @click="emit('select', { subjectId: subject.id, chapterId: chapter.id })">{{ chapter.name }}</button>
+              <span class="tree-count">{{ chapter.questionCount }}</span>
+            </div>
+            <template v-if="isExpanded(chapter.id)">
+              <button v-for="unit in chapter.units ?? []" :key="unit.id" class="tree-row tree-row--unit" :class="{ 'is-active': props.selectedUnitId === unit.id }" :title="unit.name" @click="emit('select', { subjectId: subject.id, chapterId: chapter.id, unitId: unit.id })" @contextmenu.stop="openUnitContextMenu($event, subject, chapter, unit)">
+                <span class="tree-label">{{ unit.name }}</span><span class="tree-count">{{ unit.questionCount }}</span>
+              </button>
+              <button v-if="unassignedCount(chapter) && !keyword.trim()" class="tree-row tree-row--unit" :class="{ 'is-active': props.selectedChapterId === chapter.id && props.unassignedUnit }" @click="emit('select', { subjectId: subject.id, chapterId: chapter.id, unassignedUnit: true })">
+                <span class="tree-label">未分单元</span><span class="tree-count">{{ unassignedCount(chapter) }}</span>
+              </button>
+            </template>
+          </div>
         </div>
       </div>
     </div>
@@ -454,8 +520,10 @@ function handleContextMenu(item: ContextMenuItem) {
 }
 
 .tree-row--chapter {
-  padding-left: 35px;
+  padding-left: 20px;
 }
+
+.tree-row--unit { padding-left: 58px; }
 
 .tree-toggle {
   width: 26px;

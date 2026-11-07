@@ -86,6 +86,8 @@ watch(
     bankStore.filters.keyword,
     bankStore.filters.subjectId,
     bankStore.filters.chapterId,
+    bankStore.filters.unitId,
+    bankStore.filters.unassignedUnit,
     bankStore.filters.type,
     bankStore.filters.usage,
     bankStore.filters.tagIds.join(','),
@@ -280,7 +282,7 @@ function formatDate(value?: number | null) {
       <el-select v-model="bankStore.filters.type" clearable placeholder="全部题型">
         <el-option v-for="item in typeOptions" :key="item.value" :label="item.label" :value="item.value" />
       </el-select>
-      <el-select v-model="bankStore.filters.chapterId" clearable filterable placeholder="全部章节">
+      <el-select v-model="bankStore.filters.chapterId" @change="bankStore.filters.unitId = undefined; bankStore.filters.unassignedUnit = false" clearable filterable placeholder="全部章节">
         <el-option v-for="chapter in chapterOptions" :key="chapter.id" :label="chapter.name" :value="chapter.id" />
       </el-select>
       <el-select v-model="bankStore.filters.tagIds" multiple collapse-tags clearable placeholder="全部标签">
@@ -338,6 +340,9 @@ function formatDate(value?: number | null) {
           </el-table-column>
           <el-table-column prop="subjectName" label="学科" width="120" show-overflow-tooltip />
           <el-table-column prop="chapterName" label="章节" min-width="150" show-overflow-tooltip />
+          <el-table-column label="单元" min-width="120" show-overflow-tooltip>
+            <template #default="{ row }">{{ row.unitName || '未分单元' }}</template>
+          </el-table-column>
           <el-table-column label="最近使用" width="118">
             <template #default="{ row }"><span :class="{ muted: !row.lastUsedAt }">{{ formatDate(row.lastUsedAt) }}</span></template>
           </el-table-column>

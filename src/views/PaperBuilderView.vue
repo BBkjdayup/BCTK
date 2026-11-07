@@ -102,7 +102,7 @@ const replacementPageItems = computed(() => {
 })
 const replacementScopeText = computed(() => {
   if (paperStore.current.compositionMode !== 'automatic') {
-    return '沿用手动选题页当前的关键字、学科、章节、标签和使用情况筛选，并限定为同一题型。'
+    return '沿用手动选题页当前的关键字、学科、章节、单元、标签和使用情况筛选，并限定为同一题型。'
   }
   return paperStore.current.generationConfig
     ? '使用这份试卷已保存的自动组卷学科和章节范围，并始终限定为同一题型。'
@@ -222,9 +222,11 @@ watch(questionTypeCodes, (codes) => {
   paperStore.normalizeCurrentItems()
 }, { immediate: true })
 
-function selectTree(payload: { subjectId?: string; chapterId?: string }) {
+function selectTree(payload: { subjectId?: string; chapterId?: string; unitId?: string; unassignedUnit?: boolean }) {
   bankStore.filters.subjectId = payload.subjectId
   bankStore.filters.chapterId = payload.chapterId
+  bankStore.filters.unitId = payload.unitId
+  bankStore.filters.unassignedUnit = Boolean(payload.unassignedUnit)
   bankStore.filters.page = 1
   void bankStore.load()
 }
@@ -232,6 +234,11 @@ function selectTree(payload: { subjectId?: string; chapterId?: string }) {
 function applyManualFilters() {
   bankStore.filters.page = 1
   void bankStore.load()
+}
+
+function clearManualTags() {
+  bankStore.filters.tagIds = []
+  applyManualFilters()
 }
 
 function loadManualPage(page: number) {
@@ -254,12 +261,15 @@ function openBatchDrawDialog() {
   batchDrawDialogOpen.value = true
 }
 
-function addRandomQuestions(selected: Question[]) {
+function addRandomQuestions(selected: Question[], paperId: string) {
+  if (!batchDrawDialogOpen.value || paperStore.current.id !== paperId) return
   paperStore.current.compositionMode = 'manual'
   paperStore.current.generationConfig = null
   const added = paperStore.addQuestions(selected)
   if (!added) {
     ElMessage.warning('本次抽到的题目均已在右侧，未重复加入。')
+  } else {
+    ElMessage.success(`已随机抽取并加入 ${added} 道题`)
   }
 }
 
@@ -558,43 +568,91 @@ async function startNewPaper() {
 <template>
   <div v-if="mode === 'manual'" class="app-page">
     <SubjectTree
-      title="学科与章节"
+        title="题目分类"
       :selected-subject-id="bankStore.filters.subjectId"
       :selected-chapter-id="bankStore.filters.chapterId"
+      :selected-unit-id="bankStore.filters.unitId"
+      :unassigned-unit="bankStore.filters.unassignedUnit"
       @select="selectTree"
     />
     <section class="page-main manual-page">
       <div class="manual-layout">
         <div class="candidate-card surface">
           <div class="candidate-filter">
-            <el-input v-model="bankStore.filters.keyword" placeholder="搜索题目" clearable @change="applyManualFilters" />
-            <el-select v-model="bankStore.filters.type" clearable placeholder="全部题型" @change="applyManualFilters">
+            <el-input v-model="bankStore.filters.keyword" aria-label="搜索题目" placeholder="搜索题目" clearable @change="applyManualFilters" />
+            <el-select v-model="bankStore.filters.type" aria-label="题型筛选" clearable placeholder="全部题型" @change="applyManualFilters">
               <el-option v-for="definition in enabledTypeDefinitions" :key="definition.code" :label="definition.name" :value="definition.code" />
+            </el-select>
+            <el-select
+              v-model="bankStore.filters.tagIds"
+              class="candidate-filter__tags"
+              aria-label="标签筛选"
+              multiple
+              filterable
+              collapse-tags
+              collapse-tags-tooltip
+              clearable
+              :reserve-keyword="false"
+              :multiple-limit="100"
+              placeholder="按标签筛选"
+              @change="applyManualFilters"
+            >
+              <el-option v-for="tag in appStore.tags" :key="tag.id" :label="tag.name" :value="tag.id" />
+            </el-select>
+            <el-select
+              v-model="bankStore.filters.tagMatchMode"
+              aria-label="多标签匹配方式"
+              :disabled="bankStore.filters.tagIds.length < 2"
+              title="全部标签：同时包含所有已选标签；任一标签：包含其中至少一个。"
+              @change="applyManualFilters"
+            >
+              <el-option label="全部标签" value="all" />
+              <el-option label="任一标签" value="any" />
             </el-select>
           </div>
           <div v-loading="bankStore.loading" class="candidate-list">
-            <div
-              v-for="question in bankStore.questions"
-              :key="question.id"
-              class="candidate-row"
-              @contextmenu="openQuestionContextMenu($event, question)"
-            >
-              <el-tag size="small" effect="plain">{{ typeName(question.type) }}</el-tag>
-              <div>
-                <QuestionStemSummary class="candidate-row__stem" :content="question.stem" :lines="2" />
-                <span>{{ question.subjectName }} · {{ question.chapterName }}</span>
+            <div v-if="bankStore.error" class="candidate-empty" role="alert">
+              <span>{{ bankStore.error }}</span>
+              <el-button type="primary" link @click="bankStore.load()">重新加载</el-button>
+            </div>
+            <template v-else>
+              <div
+                v-for="question in bankStore.questions"
+                :key="question.id"
+                class="candidate-row"
+                @contextmenu="openQuestionContextMenu($event, question)"
+              >
+                <el-tag size="small" effect="plain">{{ typeName(question.type) }}</el-tag>
+                <div>
+                  <QuestionStemSummary class="candidate-row__stem" :content="question.stem" :lines="2" />
+                  <span>{{ question.subjectName }} · {{ question.chapterName }} · {{ question.unitName || '未分单元' }}</span>
+                  <div v-if="question.tags.length" class="candidate-row__tags">
+                    <el-tag
+                      v-for="tag in question.tags.slice(0, 2)"
+                      :key="tag.id"
+                      :title="tag.name"
+                      size="small"
+                      type="info"
+                      effect="plain"
+                    >{{ tag.name }}</el-tag>
+                    <el-tooltip v-if="question.tags.length > 2" :content="question.tags.slice(2).map((tag) => tag.name).join('、')" placement="top">
+                      <el-tag size="small" type="info" effect="plain" tabindex="0">+{{ question.tags.length - 2 }}</el-tag>
+                    </el-tooltip>
+                  </div>
+                </div>
+                <el-button
+                  size="small"
+                  :disabled="paperStore.selectedQuestionIds.has(question.id)"
+                  @click="addQuestion(question)"
+                >{{ paperStore.selectedQuestionIds.has(question.id) ? '已加入' : '加入' }}</el-button>
               </div>
-              <el-button
-                size="small"
-                :disabled="paperStore.selectedQuestionIds.has(question.id)"
-                @click="addQuestion(question)"
-              >{{ paperStore.selectedQuestionIds.has(question.id) ? '已加入' : '加入' }}</el-button>
-            </div>
-            <div v-if="!bankStore.loading && !bankStore.questions.length" class="candidate-empty">
-              当前页没有符合条件的题目，可以调整筛选条件。
-            </div>
+              <div v-if="!bankStore.loading && !bankStore.questions.length" class="candidate-empty">
+                <span>当前页没有符合条件的题目，可以调整筛选条件。</span>
+                <el-button v-if="bankStore.filters.tagIds.length" type="primary" link @click="clearManualTags">清空标签筛选</el-button>
+              </div>
+            </template>
           </div>
-          <div class="candidate-pagination">
+          <div v-if="!bankStore.error" class="candidate-pagination">
             <span>共 {{ bankStore.total }} 道，当前第 {{ bankStore.filters.page }} 页</span>
             <el-pagination
               :current-page="bankStore.filters.page"
@@ -771,6 +829,7 @@ async function startNewPaper() {
   <RandomDrawDialog
     v-if="batchDrawDialogMounted"
     v-model="batchDrawDialogOpen"
+    :paper-id="paperStore.current.id"
     :subjects="appStore.subjects"
     :tags="appStore.tags"
     :question-types="appStore.questionTypes"
@@ -811,7 +870,7 @@ async function startNewPaper() {
             class="replacement-radio"
           >
             <QuestionStemSummary class="replacement-radio__stem" :content="question.stem" :lines="2" />
-            <small>{{ question.subjectName }} · {{ question.chapterName }}</small>
+            <small>{{ question.subjectName }} · {{ question.chapterName }} · {{ question.unitName || '未分单元' }}</small>
           </el-radio>
         </el-radio-group>
         <el-empty
@@ -895,9 +954,32 @@ async function startNewPaper() {
 .candidate-filter {
   padding: 12px;
   display: grid;
-  grid-template-columns: 1fr 150px;
+  grid-template-columns: minmax(80px, 1fr) 100px 180px 108px;
+  align-items: center;
   gap: 8px;
   border-bottom: 1px solid #edf1f5;
+}
+
+.candidate-filter > * {
+  min-width: 0;
+  width: 100%;
+}
+
+/* Keep searchable multi-select tags on one line, including while typing. */
+.candidate-filter__tags :deep(.el-select__selection) {
+  flex-wrap: nowrap;
+}
+
+.candidate-filter__tags :deep(.el-select__selected-item) {
+  min-width: 0;
+}
+
+.candidate-filter__tags :deep(.el-select__input-wrapper) {
+  flex: 1 0 40px;
+}
+
+.candidate-filter__tags :deep(.el-select__input) {
+  min-width: 0 !important;
 }
 
 .candidate-list {
@@ -908,6 +990,9 @@ async function startNewPaper() {
 
 .candidate-empty {
   padding: 64px 20px;
+  display: grid;
+  justify-items: center;
+  gap: 12px;
   color: #94a3b8;
   font-size: 11px;
   text-align: center;
@@ -944,6 +1029,27 @@ async function startNewPaper() {
 .candidate-row__stem {
   font-size: 12px;
   font-weight: 600;
+}
+
+.candidate-row__tags {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.candidate-row__tags .el-tag {
+  min-width: 0;
+  max-width: 128px;
+}
+
+.candidate-row__tags .el-tag:last-child {
+  flex-shrink: 0;
+}
+
+.candidate-row__tags :deep(.el-tag__content) {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .candidate-row span {

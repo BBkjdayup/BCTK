@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UnitSelect from '../components/UnitSelect.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { type UnlistenFn } from '@tauri-apps/api/event'
@@ -84,6 +85,8 @@ function syncSidebarSelection() {
   if (isEditing.value) return
   bankStore.filters.subjectId = draft.subjectId || undefined
   bankStore.filters.chapterId = draft.chapterId || undefined
+  bankStore.filters.unitId = draft.unitId
+  bankStore.filters.unassignedUnit = false
   bankStore.filters.page = 1
 }
 
@@ -257,6 +260,7 @@ async function load() {
       explanation: clonePlain(question.explanation),
       subjectId: question.subjectId,
       chapterId: question.chapterId,
+      unitId: question.unitId,
       tagIds: question.tags.map((tag) => tag.id),
       resourceRefs: clonePlain(question.resourceRefs ?? []),
       baseContentVersion: question.contentVersion,
@@ -287,6 +291,7 @@ async function load() {
       explanation: clonePlain(question.explanation),
       subjectId: question.subjectId,
       chapterId: question.chapterId,
+      unitId: question.unitId,
       tagIds: question.tags.map((tag) => tag.id),
       resourceRefs: (question.resourceRefs ?? []).map((entry) => ({
         ...clonePlain(entry),
@@ -301,9 +306,11 @@ async function load() {
       appStore.subjects,
       route.query.subjectId ?? bankStore.filters.subjectId,
       route.query.chapterId ?? bankStore.filters.chapterId,
+      route.query.unitId ?? bankStore.filters.unitId,
     )
     draft.subjectId = classification.subject?.id ?? ''
     draft.chapterId = classification.chapter?.id ?? ''
+    draft.unitId = classification.unit?.id
   }
 
   lastCleanSnapshot = serializeDraft()
@@ -317,15 +324,16 @@ async function load() {
 }
 
 watch(
-  () => [route.query.subjectId, route.query.chapterId],
-  ([subjectId, chapterId]) => {
+  () => [route.query.subjectId, route.query.chapterId, route.query.unitId],
+  ([subjectId, chapterId, unitId]) => {
     if (!editorReady.value || isEditing.value) return
-    const classification = resolveTaxonomyDefault(appStore.subjects, subjectId, chapterId)
+    const classification = resolveTaxonomyDefault(appStore.subjects, subjectId, chapterId, unitId)
     const nextSubjectId = classification.subject?.id ?? ''
     const nextChapterId = classification.chapter?.id ?? ''
-    if (draft.subjectId === nextSubjectId && draft.chapterId === nextChapterId) return
+    if (draft.subjectId === nextSubjectId && draft.chapterId === nextChapterId && draft.unitId === classification.unit?.id) return
     draft.subjectId = nextSubjectId
     draft.chapterId = nextChapterId
+    draft.unitId = classification.unit?.id
     syncSidebarSelection()
     touch()
   },
@@ -428,12 +436,14 @@ function onTypeChanged() {
 }
 
 function onSubjectChanged() {
+  draft.unitId = undefined
   draft.chapterId = chapterOptions.value[0]?.id ?? ''
   syncSidebarSelection()
   touch()
 }
 
 function onChapterChanged() {
+  draft.unitId = undefined
   syncSidebarSelection()
   touch()
 }
@@ -628,7 +638,7 @@ async function save() {
           :title="'Word / Excel 批量导入'"
           @click="router.push({
             path: '/word-import',
-            query: { subjectId: draft.subjectId, chapterId: draft.chapterId },
+            query: { subjectId: draft.subjectId, chapterId: draft.chapterId, unitId: draft.unitId || undefined },
           })"
         >{{ 'Word / Excel 批量导入' }}</el-button>
         <el-button type="primary" :icon="Check" :loading="saving" @click="save">保存题目</el-button>
@@ -651,6 +661,9 @@ async function save() {
           <el-select v-model="draft.chapterId" filterable @change="onChapterChanged">
             <el-option v-for="chapter in chapterOptions" :key="chapter.id" :label="chapter.name" :value="chapter.id" />
           </el-select>
+        </el-form-item>
+        <el-form-item label="单元（可选）">
+          <UnitSelect v-model="draft.unitId" :chapter="chapterOptions.find((chapter) => chapter.id === draft.chapterId)" @change="syncSidebarSelection(); touch()" />
         </el-form-item>
         <el-form-item label="标签">
           <el-select v-model="draft.tagIds" multiple filterable allow-create default-first-option collapse-tags>

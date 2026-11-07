@@ -14,7 +14,7 @@ fn now() -> i64 {
 }
 pub(super) async fn capture(tx: &mut SqliteConnection, id: &str) -> CommandResult<()> {
     let snapshot:Option<String>=sqlx::query_scalar("SELECT json_object('id',q.id,'type',q.question_type,'stem',json(q.stem_json),'answer',json(q.answer_json),'explanation',json(q.explanation_json),
-      'subjectId',q.subject_id,'chapterId',q.chapter_id,'subjectName',s.name,'chapterName',c.name,'contentVersion',q.content_version,
+      'subjectId',q.subject_id,'chapterId',q.chapter_id,'subjectName',s.name,'chapterName',c.name,'unitId',q.unit_id,'unitName',(SELECT name FROM units WHERE id=q.unit_id),'contentVersion',q.content_version,
       'lastUsedAt',q.last_used_at_ms,'deletedAt',q.deleted_at_ms,'createdAt',q.created_at_ms,'updatedAt',q.updated_at_ms,
       'options',json((SELECT json_group_array(json(o.obj)) FROM (SELECT json_object('id',id,'position',position,'content',json(content_json)) obj FROM question_options WHERE question_id=q.id ORDER BY position) o)),
       'tags',json((SELECT json_group_array(json_object('id',t.id,'name',t.name,'questionCount',0,'createdAt',t.created_at_ms,'updatedAt',t.updated_at_ms)) FROM question_tags qt JOIN tags t ON t.id=qt.tag_id WHERE qt.question_id=q.id)),
@@ -69,6 +69,7 @@ pub async fn restore(
         explanation: old.explanation,
         subject_id: old.subject_id,
         chapter_id: old.chapter_id,
+        unit_id: old.unit_id,
         tag_ids: old.tags.into_iter().map(|t| t.id).collect(),
         resource_refs: old.resource_refs,
         base_content_version: Some(expected),
@@ -84,6 +85,8 @@ pub(super) struct BatchBefore {
     pub version: i64,
     pub subject: String,
     pub chapter: String,
+    #[serde(default)]
+    pub unit: Option<String>,
     pub tags: Vec<String>,
     pub used: Option<i64>,
     pub after_used: Option<i64>,
@@ -94,7 +97,7 @@ pub(super) async fn before(
     reset_usage: bool,
 ) -> CommandResult<BatchBefore> {
     let row = sqlx::query(
-        "SELECT content_version,subject_id,chapter_id,last_used_at_ms FROM questions WHERE id=?",
+        "SELECT content_version,subject_id,chapter_id,unit_id,last_used_at_ms FROM questions WHERE id=?",
     )
     .bind(id)
     .fetch_one(&mut *tx)
@@ -112,6 +115,7 @@ pub(super) async fn before(
         version: row.get("content_version"),
         subject: row.get("subject_id"),
         chapter: row.get("chapter_id"),
+        unit: row.get("unit_id"),
         tags,
         used,
         after_used: if reset_usage { None } else { used },
@@ -183,6 +187,7 @@ pub async fn undo(pool: &SqlitePool, id: &str, app_version: &str) -> CommandResu
                 "原学科或章节已删除，不能恢复该批次",
             ));
         }
+        super::taxonomy::validate_unit(&mut tx, &item.chapter, item.unit.as_deref()).await?;
         for tag in &item.tags {
             let exists: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM tags WHERE id=?")
                 .bind(tag)
@@ -212,8 +217,8 @@ pub async fn undo(pool: &SqlitePool, id: &str, app_version: &str) -> CommandResu
             .await
             .map_err(CommandError::database)?;
         }
-        sqlx::query("UPDATE questions SET subject_id=?,chapter_id=?,last_used_at_ms=?,tags_plain=(SELECT COALESCE(group_concat(name,' '),'') FROM tags WHERE id IN(SELECT tag_id FROM question_tags WHERE question_id=?)),content_version=content_version+1,updated_at_ms=? WHERE id=?")
-          .bind(&item.subject).bind(&item.chapter).bind(item.used).bind(&item.id).bind(now()).bind(&item.id).execute(&mut *tx).await.map_err(CommandError::database)?;
+        sqlx::query("UPDATE questions SET subject_id=?,chapter_id=?,unit_id=?,last_used_at_ms=?,tags_plain=(SELECT COALESCE(group_concat(name,' '),'') FROM tags WHERE id IN(SELECT tag_id FROM question_tags WHERE question_id=?)),content_version=content_version+1,updated_at_ms=? WHERE id=?")
+          .bind(&item.subject).bind(&item.chapter).bind(&item.unit).bind(item.used).bind(&item.id).bind(now()).bind(&item.id).execute(&mut *tx).await.map_err(CommandError::database)?;
         capture(&mut tx, &item.id).await?;
     }
     sqlx::query("UPDATE question_batch_edits SET undone_at_ms=? WHERE id=?")

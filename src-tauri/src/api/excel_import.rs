@@ -43,6 +43,7 @@ struct HeaderMapping {
     question_type: Option<usize>,
     subject: Option<usize>,
     chapter: Option<usize>,
+    unit: Option<usize>,
     stem: Option<usize>,
     combined_options: Option<usize>,
     option_columns: Vec<(char, usize)>,
@@ -66,6 +67,9 @@ impl HeaderMapping {
                 }
                 "学科" | "科目" | "subject" => {
                     mapping.subject.get_or_insert(column);
+                }
+                "单元" | "unit" => {
+                    mapping.unit.get_or_insert(column);
                 }
                 "章节" | "章" | "chapter" => {
                     mapping.chapter.get_or_insert(column);
@@ -198,6 +202,7 @@ pub(super) fn prepare_import_with_task(
         let question_type = cell_at(row, headers.question_type);
         let subject_name = cell_at(row, headers.subject);
         let chapter_name = cell_at(row, headers.chapter);
+        let unit_name = headers.unit.map(|column| cell_at(row, Some(column)));
         let stem = cell_at(row, headers.stem);
         let answer = without_empty_placeholder(&cell_at(row, headers.answer));
         let explanation = without_empty_placeholder(&cell_at(row, headers.explanation));
@@ -207,6 +212,7 @@ pub(super) fn prepare_import_with_task(
             &question_type,
             &subject_name,
             &chapter_name,
+            unit_name.as_deref().unwrap_or_default(),
             &stem,
             &answer,
             &explanation,
@@ -243,6 +249,7 @@ pub(super) fn prepare_import_with_task(
             question_type,
             subject_name,
             chapter_name,
+            unit_name,
             stem,
             options,
             answer,
@@ -668,7 +675,7 @@ fn write_template_archive(file: File) -> CommandResult<u64> {
     }
     let headers = [
         "题型", "学科", "章节", "题干", "选项A", "选项B", "选项C", "选项D", "选项E", "选项F",
-        "选项G", "选项H", "答案", "解析", "标签",
+        "选项G", "选项H", "答案", "解析", "标签", "单元",
     ];
     let sheet1 = sheet_xml(&[headers.iter().map(|value| (*value).to_owned()).collect()]);
     writer
@@ -702,6 +709,12 @@ fn write_template_archive(file: File) -> CommandResult<u64> {
             "选项A-H".to_owned(),
             "选择题必填".to_owned(),
             "至少填写两个非空选项；非选择题留空".to_owned(),
+        ],
+        vec![
+            "单元".to_owned(),
+            "可选".to_owned(),
+            "填写所属章节下已有单元名称；本列留空表示未分单元。旧模板没有本列时使用当前选中单元。"
+                .to_owned(),
         ],
         vec![
             "学科/章节".to_owned(),
@@ -833,6 +846,8 @@ mod tests {
 
     fn exported_question() -> QuestionApi {
         QuestionApi {
+            unit_id: None,
+            unit_name: None,
             id: Uuid::now_v7().to_string(),
             question_type: "single_choice".to_owned(),
             question_type_name: Some("单选题".to_owned()),
@@ -930,7 +945,10 @@ mod tests {
             .create_new(true)
             .open(&output)
             .unwrap();
-        write_xlsx_archive(file, &[exported_question()], 8 * 1024 * 1024).unwrap();
+        let mut question = exported_question();
+        question.unit_id = Some(Uuid::now_v7().to_string());
+        question.unit_name = Some("导出单元".to_owned());
+        write_xlsx_archive(file, &[question], 8 * 1024 * 1024).unwrap();
 
         let prepared = prepare_import(ExcelImportRequestApi {
             input_path: output.to_string_lossy().into_owned(),
@@ -945,6 +963,7 @@ mod tests {
         assert_eq!(row.answer, "A");
         assert_eq!(row.explanation, "当前导出格式应与导入格式兼容。");
         assert_eq!(row.tag_names, ["基础"]);
+        assert_eq!(row.unit_name.as_deref(), Some("导出单元"));
 
         fs::remove_file(output).unwrap();
         fs::remove_dir(root).unwrap();

@@ -36,6 +36,7 @@ fn validate_ids(values: &[String], label: &str, maximum: usize) -> CommandResult
 
 fn validate_scope(scope: &RandomDrawScopeApi) -> CommandResult<()> {
     validate_ids(&scope.subject_ids, "学科标识", MAX_SCOPE_IDS)?;
+    validate_ids(&scope.unit_ids, "单元标识", MAX_SCOPE_IDS)?;
     validate_ids(&scope.chapter_ids, "章节标识", MAX_SCOPE_IDS)?;
     validate_ids(&scope.tag_ids, "标签标识", MAX_TAGS)?;
     validate_ids(&scope.excluded_question_ids, "已选题目标识", MAX_SCOPE_IDS)?;
@@ -65,6 +66,14 @@ fn push_scope(
         let mut separated = builder.separated(", ");
         for chapter_id in &scope.chapter_ids {
             separated.push_bind(chapter_id.clone());
+        }
+        separated.push_unseparated(")");
+    }
+    if !scope.unit_ids.is_empty() {
+        builder.push(" AND q.unit_id IN (");
+        let mut separated = builder.separated(", ");
+        for unit_id in &scope.unit_ids {
+            separated.push_bind(unit_id.clone());
         }
         separated.push_unseparated(")");
     }

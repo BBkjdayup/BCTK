@@ -8,7 +8,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#install-on-windows)
-[![Version](https://img.shields.io/badge/source-v0.1.105-16a34a)](https://github.com/BBkjdayup/BCTK/tree/main)
+[![Version](https://img.shields.io/badge/source-v0.1.107-16a34a)](https://github.com/BBkjdayup/BCTK/tree/main)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#architecture-and-data-boundaries)
 
 <p align="center">
@@ -21,9 +21,9 @@ Question data is stored locally in SQLite. Since v0.1.85, all local desktop feat
 
 Built with **Tauri 2, Vue 3, TypeScript, Rust, and SQLite**. Original source code is available under the **MIT License**. The application interface is currently in Chinese.
 
-**[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.105 source](https://github.com/BBkjdayup/BCTK/tree/main) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
+**[Download for Windows](https://tktiku.cn/#download)** · [View the v0.1.107 source](https://github.com/BBkjdayup/BCTK/tree/main) · [Run from source](#run-from-source) · [Report an issue](https://github.com/BBkjdayup/BCTK/issues)
 
-The v0.1.105 source update adds saved filters, question version history, batch-edit undo, and teacher learning reports. It also includes image and table resizing, Word compatibility improvements, and startup and backup-recovery fixes. See the [v0.1.105 source notes](docs/releases/v0.1.105.en.md). The version of the official Windows installer is shown on the [download page](https://tktiku.cn/#download).
+The v0.1.107 source update adds optional subject → chapter → unit classification and single-row tag filters for manual paper assembly. Random selection now rejects late results after cancellation, closure, or switching papers, and prevents duplicate submissions while drawing or confirming the available count. See the [v0.1.107 source notes](docs/releases/v0.1.107.en.md). The version of the official Windows installer is shown on the [download page](https://tktiku.cn/#download).
 
 ## Workflow at a glance
 
@@ -56,7 +56,7 @@ The default workflow stays on the local computer. Selected paper content is sent
   </tr>
 </table>
 
-The screenshots were captured from the v0.1.83 browser demo; the actual v0.1.105 interface may differ. The demo uses built-in sample questions and does not access real question-bank files.
+The screenshots were captured from the v0.1.83 browser demo; the actual v0.1.107 interface may differ. The demo uses built-in sample questions and does not access real question-bank files.
 
 ## Start here
 
@@ -72,7 +72,7 @@ The screenshots were captured from the v0.1.83 browser demo; the actual v0.1.105
 | Workflow | Capabilities |
 | --- | --- |
 | Capture questions | Multiple question types, answers and explanations, rich text, images, tables, and math formulas |
-| Organize a collection | Subjects, chapters, tags, search, filters, batch editing, and duplicate checks |
+| Organize a collection | Subjects, chapters, optional units, tags, search, filters, batch editing, and duplicate checks |
 | Import materials | Word `.docx` and Excel `.xlsx`, with per-question review and duplicate handling |
 | Assemble papers | Manual selection, filtered random selection, question replacement, and reordering |
 | Prepare output | Paginated editing, templates, saved layouts, Word/Excel export, and system printing |
@@ -90,6 +90,8 @@ The supported and primarily tested platform is **Windows 10 / 11 x64**.
 3. Follow the Chinese installation wizard and launch **TK试题题库**.
 
 GitHub's automatic **Source code** archives are not desktop installers. The official installer currently has no Windows Authenticode signature and may appear as an unknown publisher; application updates use a separate Tauri Updater signature.
+
+Version 0.1.107 upgrades the local database to schema 26 for optional units; existing questions remain unassigned. To return to an older version, use the database copy or backup retained before upgrading. Older applications cannot open the upgraded database, and a pre-upgrade backup does not contain later edits.
 
 ## Run from source
 

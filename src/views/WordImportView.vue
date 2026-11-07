@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UnitSelect from '../components/UnitSelect.vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { type UnlistenFn } from '@tauri-apps/api/event'
@@ -109,6 +110,8 @@ interface ImportItem {
   explanation: RichContent
   subjectId: string
   chapterId: string
+  unitId?: string | null
+  unresolvedUnitName?: string | null
   tagIds: string[]
   resourceRefs: QuestionResourceRef[]
   status: ImportStatus
@@ -185,6 +188,7 @@ const result = ref({ success: 0, failed: 0, skipped: 0 })
 const sessionTotalCount = ref(0)
 const batchSubjectId = ref('')
 const batchChapterId = ref('')
+const batchUnitId = ref<string>()
 const batchTagIds = ref<string[]>([])
 const creatingBatchTag = ref(false)
 const contextMenuOpen = ref(false)
@@ -407,6 +411,7 @@ function selectNone() {
 
 function initializeBatchClassification(item: ImportItem | undefined = items.value[0]) {
   const subject = appStore.subjects.find((entry) => entry.id === item?.subjectId) ?? appStore.subjects[0]
+  batchUnitId.value = item?.unitId || undefined
   batchSubjectId.value = subject?.id ?? ''
   batchChapterId.value = subject?.chapters.some((chapter) => chapter.id === item?.chapterId)
     ? item?.chapterId ?? ''
@@ -414,6 +419,7 @@ function initializeBatchClassification(item: ImportItem | undefined = items.valu
 }
 
 function onBatchSubjectChanged() {
+  batchUnitId.value = undefined
   batchChapterId.value = batchChapterOptions.value[0]?.id ?? ''
 }
 
@@ -429,7 +435,7 @@ function applyBatchClassification() {
     return
   }
 
-  const updated = applyWordImportBatchClassification(items.value, subject.id, chapter.id)
+  const updated = applyWordImportBatchClassification(items.value, subject.id, chapter.id, batchUnitId.value)
   for (const item of updated) refreshItemStatus(item)
   ElMessage.success(`已将 ${updated.length} 道题设置为“${subject.name} / ${chapter.name}”，可直接导入本批。`)
 }
@@ -773,10 +779,11 @@ function recognizeAnalysis(result: DocxAnalysis): ImportItem[] {
     const omitted = omittedItemCount.value
     importLimitNotice.value = `这个文档识别到 ${questions.length} 个题目；为保证草稿可安全恢复，本次只载入前 ${MAX_WORD_IMPORT_ITEMS} 项，另有 ${omitted} 项未载入。请把原文档拆分后再次导入剩余内容。`
   }
-  const { subject, chapter } = resolveTaxonomyDefault(
+  const { subject, chapter, unit } = resolveTaxonomyDefault(
     appStore.subjects,
     route.query.subjectId,
     route.query.chapterId,
+    route.query.unitId,
   )
 
   return questions.slice(0, MAX_WORD_IMPORT_ITEMS).map((question, index) => {
@@ -832,7 +839,7 @@ function recognizeAnalysis(result: DocxAnalysis): ImportItem[] {
       answer,
       explanation,
       subjectId: subject?.id ?? '',
-      chapterId: chapter?.id ?? '',
+      chapterId: chapter?.id ?? '', unitId: unit?.id,
       tagIds: [],
       resourceRefs,
       status: hasRequiredContent ? 'ok' : 'error',
@@ -856,17 +863,18 @@ function prepareReview(analysisResult: DocxAnalysis, request = recognitionReques
   sourceRecognizedItemCount.value = 0
   omittedItemCount.value = 0
   duplicateActionRules.clear()
-  const { subject, chapter } = resolveTaxonomyDefault(
+  const { subject, chapter, unit } = resolveTaxonomyDefault(
     appStore.subjects,
     route.query.subjectId,
     route.query.chapterId,
+    route.query.unitId,
   )
   items.value = recognizeAnalysis(analysisResult)
   if (!items.value.length) {
     items.value = [{
       id: crypto.randomUUID(), ordinal: 1, selected: true, type: 'short_answer',
       stem: rich(analysisResult.visibleText), options: [], optionIds: [], answer: rich(''), explanation: rich(''),
-      subjectId: subject?.id ?? '', chapterId: chapter?.id ?? '', tagIds: [], resourceRefs: [], status: 'error', ...emptyDuplicateState(),
+      subjectId: subject?.id ?? '', chapterId: chapter?.id ?? '', unitId: unit?.id, tagIds: [], resourceRefs: [], status: 'error', ...emptyDuplicateState(),
       diagnostic: '文档中没有识别到可直接拆分的题目，请在这里人工整理后再导入。',
     }]
   }
@@ -891,12 +899,13 @@ function prepareExcelReview(excel: ExcelImportAnalysis, request = recognitionReq
   omittedItemCount.value = excel.omittedItemCount
   importLimitNotice.value = excel.warnings.join(' ')
   duplicateActionRules.clear()
-  const { subject, chapter } = resolveTaxonomyDefault(
+  const { subject, chapter, unit } = resolveTaxonomyDefault(
     appStore.subjects,
     route.query.subjectId,
     route.query.chapterId,
+    route.query.unitId,
   )
-  const defaults = { subjectId: subject?.id ?? '', chapterId: chapter?.id ?? '' }
+  const defaults = { subjectId: subject?.id ?? '', chapterId: chapter?.id ?? '', unitId: unit?.id }
   items.value = excel.rows.map((row, index) => {
     const normalized = normalizeExcelImportRow(
       row,
@@ -918,6 +927,8 @@ function prepareExcelReview(excel: ExcelImportAnalysis, request = recognitionReq
       explanation: rich(normalized.explanation),
       subjectId: normalized.subjectId,
       chapterId: normalized.chapterId,
+      unitId: normalized.unitId,
+      unresolvedUnitName: normalized.unknownUnitName,
       tagIds: normalized.tagIds,
       pendingTagNames: normalized.unknownTagNames,
       resourceRefs: [],
@@ -1060,6 +1071,9 @@ function itemValidationMessage(item: ImportItem) {
   if (!item.type || !item.stem.plainText.trim()) return '题型和题干均为必填项。'
   if (!item.answer.plainText.trim()) return '题目已识别，但源文档没有提供答案；请人工补充答案后再写入题库。'
   if (!item.subjectId || !item.chapterId) return '请为题目选择学科和章节。'
+  if (item.unresolvedUnitName) return `单元“${item.unresolvedUnitName}”不在当前章节下，请重新选择单元或清除单元限制。`
+  const chapter = appStore.subjects.find((subject) => subject.id === item.subjectId)?.chapters.find((entry) => entry.id === item.chapterId)
+  if (item.unitId && !chapter?.units?.some((unit) => unit.id === item.unitId)) return '所选单元不存在或不属于当前章节。'
   if (needsOptions && (item.options.length < 2 || item.options.some((option) => !option.plainText.trim()))) {
     return '选择题至少需要两个非空选项。'
   }
@@ -1235,6 +1249,7 @@ function itemDraft(item: ImportItem): QuestionDraft {
     explanation: clonePlain(item.explanation),
     subjectId: item.subjectId,
     chapterId: item.chapterId,
+    unitId: item.unitId,
     tagIds: [...item.tagIds],
     resourceRefs: clonePlain(activeResourceRefs(item)),
   }
@@ -1250,6 +1265,7 @@ function toWordImportDraftItem(item: ImportItem): WordImportDraftItem {
     ordinal: item.ordinal,
     selected: item.selected,
     payload: itemDraft(item),
+    unresolvedUnitName: item.unresolvedUnitName,
     status: item.status,
     diagnostic: item.diagnostic ?? null,
     duplicateKind,
@@ -1280,6 +1296,8 @@ function fromWordImportDraftItem(entry: WordImportDraftItem): ImportItem {
     explanation: clonePlain(entry.payload.explanation),
     subjectId: entry.payload.subjectId,
     chapterId: entry.payload.chapterId,
+    unitId: entry.payload.unitId,
+    unresolvedUnitName: entry.unresolvedUnitName,
     tagIds: [...entry.payload.tagIds],
     resourceRefs: clonePlain(entry.payload.resourceRefs ?? []),
     status: entry.status,
@@ -1340,6 +1358,8 @@ function reviewSnapshot() {
       explanation: item.explanation,
       subjectId: item.subjectId,
       chapterId: item.chapterId,
+      unitId: item.unitId,
+      unresolvedUnitName: item.unresolvedUnitName,
       tagIds: item.tagIds,
       resourceRefs: item.resourceRefs,
       status: item.status,
@@ -2133,6 +2153,8 @@ function onTypeChanged(item: ImportItem) {
 function onSubjectChanged(item: ImportItem) {
   const subject = appStore.subjects.find((entry) => entry.id === item.subjectId)
   item.chapterId = subject?.chapters[0]?.id ?? ''
+  item.unitId = undefined
+  item.unresolvedUnitName = undefined
   validateItem(item)
 }
 
@@ -2676,6 +2698,7 @@ function resetState() {
   sessionTotalCount.value = 0
   batchSubjectId.value = ''
   batchChapterId.value = ''
+  batchUnitId.value = undefined
   batchTagIds.value = []
   failedImportItemIds.clear()
   overwriteOperationIds.clear()
@@ -2880,9 +2903,10 @@ async function reset() {
               <el-select v-model="batchSubjectId" size="small" placeholder="选择学科" @change="onBatchSubjectChanged">
                 <el-option v-for="subject in appStore.subjects" :key="subject.id" :label="subject.name" :value="subject.id" />
               </el-select>
-              <el-select v-model="batchChapterId" size="small" placeholder="选择章节">
+              <el-select v-model="batchChapterId" @change="batchUnitId = undefined" size="small" placeholder="选择章节">
                 <el-option v-for="chapter in batchChapterOptions" :key="chapter.id" :label="chapter.name" :value="chapter.id" />
               </el-select>
+              <UnitSelect v-model="batchUnitId" :chapter="batchChapterOptions.find((chapter) => chapter.id === batchChapterId)" size="small" />
             </div>
             <el-button
               class="batch-classification__apply"
@@ -2955,9 +2979,13 @@ async function reset() {
               </el-select>
             </el-form-item>
             <el-form-item label="章节" required>
-              <el-select v-model="activeItem.chapterId" @change="validateItem(activeItem)">
+              <el-select v-model="activeItem.chapterId" @change="activeItem.unitId = undefined; activeItem.unresolvedUnitName = undefined; validateItem(activeItem)">
                 <el-option v-for="chapter in chapterOptions" :key="chapter.id" :label="chapter.name" :value="chapter.id" />
               </el-select>
+            </el-form-item>
+            <el-form-item label="单元（可选）">
+              <UnitSelect v-model="activeItem.unitId" :chapter="chapterOptions.find((chapter) => chapter.id === activeItem?.chapterId)" @change="activeItem.unresolvedUnitName = undefined; validateItem(activeItem)" />
+              <el-button v-if="activeItem.unresolvedUnitName" link type="warning" @click="activeItem.unresolvedUnitName = undefined; activeItem.unitId = undefined; validateItem(activeItem)">设为未分单元</el-button>
             </el-form-item>
             <el-form-item label="标签">
               <el-select v-model="activeItem.tagIds" multiple filterable collapse-tags placeholder="可选">

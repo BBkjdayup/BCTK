@@ -8,6 +8,8 @@ export interface WordImportBatchSelectable {
 export interface WordImportBatchClassifiable extends WordImportBatchSelectable {
   subjectId: string
   chapterId: string
+  unitId?: string | null
+  unresolvedUnitName?: string | null
 }
 
 export interface WordImportBatchTaggable extends WordImportBatchSelectable {
@@ -130,12 +132,15 @@ export function applyWordImportBatchClassification<T extends WordImportBatchClas
   items: readonly T[],
   subjectId: string,
   chapterId: string,
+  unitId?: string,
 ): T[] {
   const updated: T[] = []
   for (const item of items) {
     if (!item.selected) continue
     item.subjectId = subjectId
     item.chapterId = chapterId
+    item.unitId = unitId
+    item.unresolvedUnitName = undefined
     updated.push(item)
   }
   return updated
@@ -227,6 +232,7 @@ export function wordImportQuestionSemanticSignature(draft: QuestionDraft): strin
     explanation: canonicalRichContent(draft.explanation),
     subjectId: draft.subjectId,
     chapterId: draft.chapterId,
+    unitId: draft.unitId || undefined,
     tagIds: [...draft.tagIds].sort((left, right) => left.localeCompare(right)),
     resourceRefs: resources,
   })

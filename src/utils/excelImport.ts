@@ -15,6 +15,7 @@ import {
 export interface ExcelImportDefaults {
   subjectId: string
   chapterId: string
+  unitId?: string
 }
 
 export interface NormalizedExcelImportRow {
@@ -27,8 +28,10 @@ export interface NormalizedExcelImportRow {
   explanation: string
   subjectId: string
   chapterId: string
+  unitId?: string
   tagIds: string[]
   unknownTagNames: string[]
+  unknownUnitName?: string
 }
 
 const builtinAliases: Record<string, string> = {
@@ -109,6 +112,10 @@ export function normalizeExcelImportRow(
   const chapter = row.chapterName.trim()
     ? subject?.chapters.find((candidate) => key(candidate.name) === key(row.chapterName))
     : defaultChapter
+  const unit = row.unitName !== undefined
+    ? chapter?.units?.find((candidate) => key(candidate.name) === key(row.unitName ?? ''))
+    : chapter?.id === defaults.chapterId ? chapter?.units?.find((candidate) => candidate.id === defaults.unitId) : undefined
+  const unknownUnitName = row.unitName?.trim() && !unit ? row.unitName.trim() : undefined
   const tagIds: string[] = []
   const unknownTagNames: string[] = []
   for (const name of row.tagNames) {
@@ -133,6 +140,8 @@ export function normalizeExcelImportRow(
     explanation: row.explanation.trim(),
     subjectId: subject?.id ?? '',
     chapterId: chapter?.id ?? '',
+    unitId: unit?.id,
+    ...(unknownUnitName ? { unknownUnitName } : {}),
     tagIds: [...new Set(tagIds)],
     unknownTagNames: [...new Set(unknownTagNames)],
   }

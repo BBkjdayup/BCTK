@@ -23,6 +23,7 @@ type CountMode = 'total' | 'by_type'
 
 const props = defineProps<{
   modelValue: boolean
+  paperId: string
   subjects: Subject[]
   tags: Tag[]
   questionTypes: QuestionTypeDefinition[]
@@ -31,24 +32,31 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
-  add: [questions: Question[]]
+  add: [questions: Question[], paperId: string]
 }>()
 
 const MAX_RANDOM_DRAW_QUESTIONS = 1_000
 
 const subjectIds = ref<string[]>([])
 const chapterIds = ref<string[]>([])
+const unitIds = ref<string[]>([])
 const tagIds = ref<string[]>([])
 const tagMatchMode = ref<QuestionTagMatchMode>('any')
 const usage = ref<RandomDrawUsageFilter>('all')
 const countMode = ref<CountMode>('by_type')
 const totalCount = ref(10)
 const counts = ref<Record<QuestionType, number>>({})
-const loading = ref(false)
+const analyzing = ref(false)
+const drawing = ref(false)
+const loading = computed(() => analyzing.value || drawing.value)
 const loaded = ref(false)
-const failure = ref('')
+const analysisFailure = ref('')
+const drawFailure = ref('')
+const failure = computed(() => drawFailure.value || analysisFailure.value)
 const analysis = ref<RandomDrawAnalysis>({ availableTotal: 0, availableByType: {} })
-let requestSequence = 0
+let analysisSequence = 0
+let drawSequence = 0
+let active = false
 let refreshTimer: ReturnType<typeof setTimeout> | null = null
 
 const enabledTypes = computed(() => enabledQuestionTypes(props.questionTypes))
@@ -61,6 +69,14 @@ const chapterOptions = computed(() => {
       optionLabel: `${subject.name} / ${chapter.name}`,
     })))
 })
+const unitOptions = computed(() => chapterOptions.value
+  .filter((chapter) => !chapterIds.value.length || chapterIds.value.includes(chapter.id))
+  .flatMap((chapter) => (chapter.units ?? []).map((unit) => ({ ...unit, optionLabel: `${chapter.optionLabel} / ${unit.name}` }))))
+function changeChapters() {
+  const available = new Set(unitOptions.value.map((unit) => unit.id))
+  unitIds.value = unitIds.value.filter((id) => available.has(id))
+  scheduleAnalysis(true)
+}
 const requestedTotal = computed(() => countMode.value === 'total'
   ? Math.max(0, Math.trunc(Number(totalCount.value) || 0))
   : Object.values(counts.value).reduce(
@@ -72,6 +88,7 @@ function scope(): RandomDrawScope {
   return {
     subjectIds: [...subjectIds.value],
     chapterIds: [...chapterIds.value],
+    unitIds: [...unitIds.value],
     tagIds: [...tagIds.value],
     tagMatchMode: tagMatchMode.value,
     usage: usage.value,
@@ -79,27 +96,63 @@ function scope(): RandomDrawScope {
   }
 }
 
+function invalidateAnalysis() {
+  analysisSequence += 1
+  if (refreshTimer) clearTimeout(refreshTimer)
+  refreshTimer = null
+  analyzing.value = false
+}
+
+function invalidateRequests() {
+  invalidateAnalysis()
+  drawSequence += 1
+  drawing.value = false
+  loaded.value = false
+  analysisFailure.value = ''
+  drawFailure.value = ''
+}
+
+function updateVisibility(open: boolean) {
+  // Invalidate synchronously; the parent's updated prop arrives on the next render.
+  if (!open) {
+    active = false
+    invalidateRequests()
+  }
+  emit('update:modelValue', open)
+}
+
+function closeDialog(done: () => void) {
+  // Element Plus updates modelValue after the leave animation, so cancel first.
+  updateVisibility(false)
+  done()
+}
+
 async function refreshAnalysis(showFailureMessage = false) {
-  const sequence = ++requestSequence
-  loading.value = true
-  failure.value = ''
+  if (!active) return
+  invalidateAnalysis()
+  const sequence = analysisSequence
+  analyzing.value = true
+  analysisFailure.value = ''
   try {
     const result = await backend.analyzeRandomDraw(scope())
-    if (sequence !== requestSequence) return
+    if (!active || sequence !== analysisSequence) return
     analysis.value = result
     loaded.value = true
   } catch (reason) {
-    if (sequence !== requestSequence) return
+    if (!active || sequence !== analysisSequence) return
     loaded.value = false
-    failure.value = errorMessage(reason, '读取随机抽题候选数量失败')
-    if (showFailureMessage) ElMessage.error(failure.value)
+    analysisFailure.value = errorMessage(reason, '读取随机抽题候选数量失败')
+    if (showFailureMessage) ElMessage.error(analysisFailure.value)
   } finally {
-    if (sequence === requestSequence) loading.value = false
+    if (sequence === analysisSequence) analyzing.value = false
   }
 }
 
 function scheduleAnalysis(showFailureMessage = false) {
-  if (refreshTimer) clearTimeout(refreshTimer)
+  invalidateAnalysis()
+  if (!active) return
+  loaded.value = false
+  analysisFailure.value = ''
   refreshTimer = setTimeout(() => {
     refreshTimer = null
     void refreshAnalysis(showFailureMessage)
@@ -109,12 +162,14 @@ function scheduleAnalysis(showFailureMessage = false) {
 function changeSubjects() {
   const availableChapterIds = new Set(chapterOptions.value.map((chapter) => chapter.id))
   chapterIds.value = chapterIds.value.filter((chapterId) => availableChapterIds.has(chapterId))
-  scheduleAnalysis(true)
+  changeChapters()
 }
 
 function resetConditions() {
+  if (drawing.value) return
   subjectIds.value = []
   chapterIds.value = []
+  unitIds.value = []
   tagIds.value = []
   tagMatchMode.value = 'any'
   usage.value = 'all'
@@ -124,7 +179,7 @@ function resetConditions() {
     enabledTypes.value.map((definition) => [definition.code, 0]),
   )
   loaded.value = false
-  failure.value = ''
+  drawFailure.value = ''
   analysis.value = { availableTotal: 0, availableByType: {} }
   scheduleAnalysis(true)
 }
@@ -141,6 +196,7 @@ function request(): RandomDrawRequest {
 }
 
 async function drawAndAdd() {
+  if (!active || !props.modelValue || drawing.value) return
   const requested = requestedTotal.value
   if (requested < 1) {
     ElMessage.warning(countMode.value === 'total'
@@ -153,10 +209,15 @@ async function drawAndAdd() {
     return
   }
 
-  loading.value = true
-  failure.value = ''
+  const sequence = ++drawSequence
+  const paperId = props.paperId
+  const isCurrent = () => active && props.modelValue
+    && sequence === drawSequence && props.paperId === paperId
+  drawing.value = true
+  drawFailure.value = ''
   try {
     const selected = await backend.drawRandomQuestions(request())
+    if (!isCurrent()) return
     if (!selected.length) {
       ElMessage.warning('当前候选题库没有可加入的新题。')
       await refreshAnalysis()
@@ -170,18 +231,19 @@ async function drawAndAdd() {
           { type: 'warning', confirmButtonText: `加入 ${selected.length} 道`, cancelButtonText: '返回修改' },
         )
       } catch {
-        await refreshAnalysis()
+        if (isCurrent()) await refreshAnalysis()
         return
       }
     }
-    emit('add', selected)
-    ElMessage.success(`已随机抽取并加入 ${selected.length} 道题`)
-    scheduleAnalysis()
+    if (!isCurrent()) return
+    emit('add', selected, paperId)
+    if (isCurrent()) scheduleAnalysis()
   } catch (reason) {
-    failure.value = errorMessage(reason, '随机抽题失败')
-    ElMessage.error(failure.value)
+    if (!isCurrent()) return
+    drawFailure.value = errorMessage(reason, '随机抽题失败')
+    ElMessage.error(drawFailure.value)
   } finally {
-    loading.value = false
+    if (isCurrent()) drawing.value = false
   }
 }
 
@@ -191,9 +253,11 @@ watch(enabledTypes, (definitions) => {
   )
 }, { immediate: true })
 
-watch(() => props.modelValue, (open) => {
+watch(() => [props.modelValue, props.paperId] as const, ([open]) => {
+  active = open
+  invalidateRequests()
   if (open) scheduleAnalysis()
-}, { immediate: true })
+}, { immediate: true, flush: 'sync' })
 
 watch(
   () => props.excludedQuestionIds.join(','),
@@ -203,8 +267,8 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  requestSequence += 1
-  if (refreshTimer) clearTimeout(refreshTimer)
+  active = false
+  invalidateRequests()
 })
 </script>
 
@@ -214,13 +278,15 @@ onBeforeUnmount(() => {
     title="从标签候选题库随机抽题"
     width="780px"
     destroy-on-close
-    @update:model-value="emit('update:modelValue', $event)"
+    :before-close="closeDialog"
+    @update:model-value="updateVisibility"
   >
     <div class="batch-draw-dialog">
       <div class="batch-draw-scope-grid">
         <el-form-item label="所属学科">
           <el-select
             v-model="subjectIds"
+            :disabled="drawing"
             multiple
             filterable
             collapse-tags
@@ -235,14 +301,20 @@ onBeforeUnmount(() => {
         <el-form-item label="章节范围">
           <el-select
             v-model="chapterIds"
+            :disabled="drawing"
             multiple
             collapse-tags
             collapse-tags-tooltip
             clearable
             placeholder="全部章节"
-            @change="scheduleAnalysis(true)"
+            @change="changeChapters"
           >
             <el-option v-for="chapter in chapterOptions" :key="chapter.id" :label="chapter.optionLabel" :value="chapter.id" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="单元范围（可选）">
+          <el-select v-model="unitIds" :disabled="drawing" aria-label="抽题单元范围" multiple filterable collapse-tags collapse-tags-tooltip clearable placeholder="全部单元（含未分单元）" @change="scheduleAnalysis(true)">
+            <el-option v-for="unit in unitOptions" :key="unit.id" :label="unit.optionLabel" :value="unit.id" />
           </el-select>
         </el-form-item>
       </div>
@@ -250,19 +322,20 @@ onBeforeUnmount(() => {
         <el-form-item label="标签范围（可选）">
           <el-select
             v-model="tagIds"
+            :disabled="drawing"
             multiple
             filterable
             collapse-tags
             collapse-tags-tooltip
             clearable
-            placeholder="不选则统计当前学科和章节内全部题目"
+            placeholder="不选则统计当前分类内全部题目"
             @change="scheduleAnalysis(true)"
           >
             <el-option v-for="tag in tags" :key="tag.id" :label="tag.name" :value="tag.id" />
           </el-select>
         </el-form-item>
         <el-form-item label="使用状态">
-          <el-select v-model="usage" @change="scheduleAnalysis(true)">
+          <el-select v-model="usage" :disabled="drawing" @change="scheduleAnalysis(true)">
             <el-option
               v-for="option in questionUsageFilterOptions"
               :key="option.value"
@@ -276,7 +349,7 @@ onBeforeUnmount(() => {
         <el-form-item label="多标签匹配">
           <el-radio-group
             v-model="tagMatchMode"
-            :disabled="tagIds.length < 2"
+            :disabled="drawing || tagIds.length < 2"
             @change="scheduleAnalysis(true)"
           >
             <el-radio-button value="any">任一标签</el-radio-button>
@@ -284,7 +357,7 @@ onBeforeUnmount(() => {
           </el-radio-group>
         </el-form-item>
         <el-form-item label="抽取方式">
-          <el-radio-group v-model="countMode">
+          <el-radio-group v-model="countMode" :disabled="drawing">
             <el-radio-button value="by_type">按题型</el-radio-button>
             <el-radio-button value="total">按总题量</el-radio-button>
           </el-radio-group>
@@ -293,9 +366,9 @@ onBeforeUnmount(() => {
 
       <div v-if="countMode === 'total'" class="batch-draw-total-row">
         <span>本次随机抽取</span>
-        <el-input-number v-model="totalCount" :min="1" :max="MAX_RANDOM_DRAW_QUESTIONS" />
+        <el-input-number v-model="totalCount" :disabled="drawing" :min="1" :max="MAX_RANDOM_DRAW_QUESTIONS" />
         <span>道</span>
-        <span class="available-total">当前剩余可用 {{ loaded ? analysis.availableTotal : loading ? '读取中…' : '—' }} 道</span>
+        <span class="available-total">当前剩余可用 {{ loaded ? analysis.availableTotal : analyzing ? '读取中…' : '—' }} 道</span>
       </div>
       <div v-else class="type-count-table batch-type-table">
         <div class="type-count-table__head"><span>题型</span><span>本次抽取</span><span>剩余可用</span><span>状态</span></div>
@@ -303,17 +376,18 @@ onBeforeUnmount(() => {
           <strong>{{ definition.name }}</strong>
           <el-input-number
             v-model="counts[definition.code]"
+            :disabled="drawing"
             :min="0"
             :max="MAX_RANDOM_DRAW_QUESTIONS"
             size="small"
           />
-          <span>{{ loaded ? `${analysis.availableByType[definition.code] ?? 0} 道` : loading ? '读取中…' : '—' }}</span>
+          <span>{{ loaded ? `${analysis.availableByType[definition.code] ?? 0} 道` : analyzing ? '读取中…' : '—' }}</span>
           <el-tag
             size="small"
             :type="loaded && (analysis.availableByType[definition.code] ?? 0) >= (counts[definition.code] ?? 0) ? 'success' : 'danger'"
             effect="plain"
           >
-            {{ loading ? '正在统计' : loaded && (analysis.availableByType[definition.code] ?? 0) >= (counts[definition.code] ?? 0) ? '数量充足' : loaded ? '数量不足' : '尚未统计' }}
+            {{ analyzing ? '正在统计' : loaded && (analysis.availableByType[definition.code] ?? 0) >= (counts[definition.code] ?? 0) ? '数量充足' : loaded ? '数量不足' : '尚未统计' }}
           </el-tag>
         </div>
       </div>
@@ -321,9 +395,9 @@ onBeforeUnmount(() => {
     </div>
     <template #footer>
       <div class="batch-draw-footer">
-        <el-button @click="resetConditions">重置条件</el-button>
+        <el-button :disabled="drawing" @click="resetConditions">重置条件</el-button>
         <div class="batch-draw-footer__actions">
-          <el-button @click="emit('update:modelValue', false)">取消</el-button>
+          <el-button @click="updateVisibility(false)">取消</el-button>
           <el-button
             type="primary"
             :icon="MagicStick"

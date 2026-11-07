@@ -228,6 +228,17 @@ const chapterData = computed<ChapterStatistics[]>(() => {
     .map(({ id, name, subject, count }) => ({ id, name, subject, count }))
 })
 
+const unitData = computed(() => {
+  const counts = new Map<string, { id: string; name: string; path: string; count: number }>()
+  for (const question of questions.value) {
+    const id = question.unitId || `unassigned:${question.chapterId}`
+    const entry = counts.get(id) ?? { id, name: question.unitName || '未分单元', path: `${question.subjectName} / ${question.chapterName}`, count: 0 }
+    entry.count += 1
+    counts.set(id, entry)
+  }
+  return [...counts.values()].sort((a, b) => b.count - a.count || a.path.localeCompare(b.path, 'zh-CN') || a.name.localeCompare(b.name, 'zh-CN'))
+})
+
 const tagData = computed<TagStatistics[]>(() => {
   const tags = [...appStore.tags]
   const knownTagIds = new Set(tags.map((tag) => tag.id))
@@ -298,7 +309,7 @@ const metrics = computed(() => [
           <span class="nav-icon" aria-hidden="true" />题型分析
         </button>
         <button type="button" class="sidebar-menu__item" :class="{ 'is-active': activeSection === 'subjects' }" :aria-current="activeSection === 'subjects' ? 'page' : undefined" @click="activeSection = 'subjects'">
-          <span class="nav-icon" aria-hidden="true" />学科章节
+          <span class="nav-icon" aria-hidden="true" />分类统计
         </button>
         <button type="button" class="sidebar-menu__item" :class="{ 'is-active': activeSection === 'tags' }" :aria-current="activeSection === 'tags' ? 'page' : undefined" @click="activeSection = 'tags'">
           <span class="nav-icon" aria-hidden="true" />标签使用
@@ -345,7 +356,7 @@ const metrics = computed(() => [
 
         <div v-if="totalQuestions === 0" class="surface state-card empty-card" role="status">
           <strong>题库中还没有题目</strong>
-          <p>录入或导入题目后，这里会自动显示真实的题型、学科、章节和标签统计。</p>
+          <p>录入或导入题目后，这里会自动显示真实的题型、学科、章节、单元和标签统计。</p>
         </div>
 
         <div v-else-if="activeSection === 'overview'" class="overview-grid">
@@ -422,6 +433,12 @@ const metrics = computed(() => [
                 <b>{{ item.count }} 题</b>
               </div>
             </div>
+          </article>
+          <article class="surface detail-card unit-detail">
+            <header class="detail-card__header"><div><h2>单元题量</h2><p>未分单元题目按所属章节分别统计</p></div></header>
+            <div class="rank-list"><div v-for="(item, index) in unitData" :key="item.id">
+              <span class="rank">{{ index + 1 }}</span><div><strong>{{ item.name }}</strong><small>{{ item.path }}</small></div><b>{{ item.count }} 题</b>
+            </div></div>
           </article>
         </div>
 
@@ -906,4 +923,8 @@ const metrics = computed(() => [
     grid-template-columns: repeat(3, 1fr);
   }
 }
+</style>
+
+<style scoped>
+.unit-detail { grid-column: 1 / -1; }
 </style>

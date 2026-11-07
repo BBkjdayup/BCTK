@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UnitSelect from './UnitSelect.vue'
 import { computed, reactive, watch } from 'vue'
 import type {
   QuestionSummary,
@@ -46,7 +47,7 @@ watch(
 watch(
   () => form.subjectId,
   (subjectId, previousSubjectId) => {
-    if (subjectId !== previousSubjectId) form.chapterId = ''
+    if (subjectId !== previousSubjectId) { form.chapterId = ''; form.unitId = undefined }
   },
 )
 
@@ -83,11 +84,11 @@ function submit() {
       <section class="form-section">
         <div class="section-heading">
           <strong>所属分类</strong>
-          <span>学科和章节必须成对修改，避免出现章节与学科不匹配。</span>
+          <span>选择目标学科、章节和可选单元；单元留空表示取消单元归属。</span>
         </div>
         <el-select v-model="form.classificationMode" class="operation-select">
-          <el-option label="保持原学科和章节" value="keep" />
-          <el-option label="统一修改学科和章节" value="change" />
+          <el-option label="保持原分类" value="keep" />
+          <el-option label="统一修改分类" value="change" />
         </el-select>
         <div v-if="form.classificationMode === 'change'" class="paired-fields">
           <el-select v-model="form.subjectId" filterable placeholder="选择目标学科">
@@ -96,6 +97,7 @@ function submit() {
           <el-select v-model="form.chapterId" filterable :disabled="!form.subjectId" placeholder="选择目标章节">
             <el-option v-for="chapter in chapters" :key="chapter.id" :label="chapter.name" :value="chapter.id" />
           </el-select>
+          <UnitSelect v-model="form.unitId" :chapter="chapters.find((chapter) => chapter.id === form.chapterId)" />
         </div>
       </section>
 
@@ -198,7 +200,7 @@ function submit() {
 
 .paired-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 

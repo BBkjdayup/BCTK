@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
+import { nextTick } from 'vue'
 import { backend } from '../services/backend'
 import type { BootstrapData, PageResult, Question, QuestionDraft } from '../types/domain'
 import { useAppStore } from './app'
@@ -143,6 +144,43 @@ describe('question bank filter isolation', () => {
     vi.spyOn(backend, 'initialize').mockRejectedValue(new Error('temporary failure'))
 
     await expect(store.save({} as QuestionDraft)).resolves.toBe(savedQuestion)
+  })
+
+  it('falls back to the chapter after deleting the selected unit and preserves other filters', async () => {
+    const store = useQuestionBankStore()
+    const appStore = useAppStore()
+    const bootstrap = structuredClone(refreshedBootstrap)
+    bootstrap.subjects[0]!.chapters[0]!.units = [{
+      id: 'unit-1', chapterId: 'chapter-1', name: '单元', sortOrder: 1, questionCount: 0,
+    }]
+    const initialize = vi.spyOn(backend, 'initialize').mockResolvedValue(bootstrap)
+    const list = vi.spyOn(backend, 'listQuestionSummaries')
+      .mockResolvedValue({ items: [], total: 1, page: 1, pageSize: 20 })
+    await appStore.initialize()
+    store.initializeFilters({
+      subjectId: 'subject-1', chapterId: 'chapter-1', unitId: 'unit-1',
+      keyword: '关键字', tagIds: ['tag-1'], tagMatchMode: 'any', page: 3,
+    })
+
+    // Renaming and a failed refresh must preserve the selected unit.
+    initialize.mockResolvedValueOnce(structuredClone(bootstrap))
+    await appStore.refreshTaxonomy()
+    expect(store.filters.unitId).toBe('unit-1')
+    initialize.mockRejectedValueOnce(new Error('temporary failure'))
+    await appStore.refreshTaxonomy()
+    expect(store.filters.unitId).toBe('unit-1')
+    expect(list).not.toHaveBeenCalled()
+
+    vi.spyOn(backend, 'deleteUnit').mockResolvedValue()
+    initialize.mockResolvedValueOnce(structuredClone(refreshedBootstrap))
+    await appStore.deleteUnit('unit-1')
+    await nextTick()
+    expect(store.filters).toMatchObject({
+      subjectId: 'subject-1', chapterId: 'chapter-1', unitId: undefined,
+      unassignedUnit: false, keyword: '关键字', tagIds: ['tag-1'], tagMatchMode: 'any', page: 1,
+    })
+    expect(list).toHaveBeenCalledWith(expect.objectContaining({ chapterId: 'chapter-1', unitId: undefined }))
+    expect(store.total).toBe(1)
   })
 
   it('preserves mutation errors and does not refresh after a failed write', async () => {

@@ -8,7 +8,7 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Windows](https://img.shields.io/badge/platform-Windows_10%20%2F%2011-0078D4)](#获取与使用)
-[![Version](https://img.shields.io/badge/source-v0.1.105-16a34a)](https://github.com/BBkjdayup/BCTK/tree/main)
+[![Version](https://img.shields.io/badge/source-v0.1.107-16a34a)](https://github.com/BBkjdayup/BCTK/tree/main)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB)](#技术组成与目录)
 
 <p align="center">
@@ -21,9 +21,9 @@ TK试题题库是一款面向教师个人和教育机构的 Windows 桌面软件
 
 项目基于 **Tauri 2 + Vue 3 + TypeScript + Rust + SQLite** 构建，源码采用 **MIT 许可证**。
 
-**[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.105 源码](https://github.com/BBkjdayup/BCTK/tree/main) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
+**[下载 Windows 正式版](https://tktiku.cn/#download)** · [查看 v0.1.107 源码](https://github.com/BBkjdayup/BCTK/tree/main) · [从源码运行](#从源码运行) · [反馈问题](https://github.com/BBkjdayup/BCTK/issues)
 
-v0.1.105 源码包含常用筛选保存、题目历史版本、批量编辑撤销和教师学情报告，并汇总了图片与表格尺寸调整、Word 兼容、启动及备份恢复修复。详情见 [v0.1.105 源码说明](docs/releases/v0.1.105.md)；官网安装包版本以[下载页面](https://tktiku.cn/#download)为准。
+v0.1.107 源码包含“科目 → 章节 → 单元”可选三级分类、手动组卷单行标签筛选，以及随机抽题取消、关闭或换卷后迟到结果的保护；抽题与数量确认期间会阻止重复提交。详情见 [v0.1.107 源码说明](docs/releases/v0.1.107.md)；官网安装包版本以[下载页面](https://tktiku.cn/#download)为准。
 
 ## 一图了解使用流程
 
@@ -56,7 +56,7 @@ flowchart LR
   </tr>
 </table>
 
-截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.105 的实际界面可能有所变化。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
+截图来自 v0.1.83 浏览器演示模式，使用内置示例题；v0.1.107 的实际界面可能有所变化。演示模式不读写真实题库，文件导入导出、备份恢复等操作需要桌面版。
 
 ## 从这里开始
 
@@ -74,9 +74,9 @@ flowchart LR
 | 场景 | 支持的功能 |
 | --- | --- |
 | 录入与编辑 | 单选、多选、填空、判断、简答及自定义题型；题干、选项、答案和解析；图片、表格、数学公式、上下标与富文本编辑 |
-| 整理题库 | 按学科、章节和标签分类；搜索筛选、批量编辑、题目预览、使用状态筛选和重复题检测 |
+| 整理题库 | 按学科、章节、可选单元和标签分类；搜索筛选、批量编辑、题目预览、使用状态筛选和重复题检测 |
 | 批量导入 | 从 Word `.docx` 和 Excel `.xlsx` 导入；逐题审查、分类调整、重复项处理及可恢复草稿 |
-| 选题组卷 | 手动选题与随机抽题；按学科、章节、标签和使用状态限定候选；支持多学科抽题、题目替换与排序 |
+| 选题组卷 | 手动选题与随机抽题；按学科、章节、可选单元、标签和使用状态限定候选；支持多学科抽题、题目替换与排序 |
 | 排版与打印 | 真实分页编辑、试卷模板、图片与表格、分页符、撤销重做、缩放、排版保存和系统打印 |
 | 文档导出 | 将题库或已保存试卷导出为 Word；将题库导出为 Excel；Word 支持受管图片、表格及可编辑数学公式 |
 | 历史与统计 | 试卷草稿、历史试卷、题目快照、题库统计、近期新增和使用情况 |
@@ -105,6 +105,8 @@ Word 文档由本机 Rust 模块读取和生成，无需自动调用 Microsoft O
 3. 启动“TK试题题库”，建立分类并尝试录入、筛选和组卷。
 
 GitHub 自动生成的 **Source code** 压缩包是源码，不能直接作为桌面程序运行。安装包目前没有 Windows Authenticode 代码签名，Windows 可能显示“未知发布者”；软件自动更新使用独立的 Tauri Updater 签名校验。
+
+0.1.107 会将本地题库升级到支持可选单元的 schema 26，原有题目默认未分单元。若需回退旧版，请使用升级前保留的原库或备份；旧程序不能直接打开升级后的题库，旧备份也不包含升级后的编辑。
 
 安装程序默认仅为当前 Windows 用户安装。若电脑缺少 WebView2，安装时会联网下载运行环境；因此，本地功能可离线使用不代表首次安装在所有电脑上都完全离线。
 

@@ -395,6 +395,42 @@ async fn reject_unexpected_triggers(
     } else {
         Vec::new()
     };
+    if schema_version >= 26 {
+        for name in [
+            "questions_unit_insert",
+            "questions_unit_update",
+            "units_chapter_update",
+        ] {
+            expected.push(name.to_owned());
+            let sql: Option<String> =
+                sqlx::query_scalar("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?")
+                    .bind(name)
+                    .fetch_optional(&mut *connection)
+                    .await
+                    .map_err(CommandError::database)?;
+            let declaration = format!("CREATE TRIGGER {name} ");
+            let source = include_str!("../../migrations/0026_optional_units.sql");
+            let body = source
+                .split_once(&declaration)
+                .and_then(|(_, tail)| tail.split_once("END;"))
+                .map(|(body, _)| body);
+            let trusted = format!("{declaration}{}END", body.unwrap_or_default());
+            let normalize = |value: &str| {
+                value
+                    .trim()
+                    .trim_end_matches(';')
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            if sql.as_deref().map(normalize) != Some(normalize(&trusted)) {
+                return Err(CommandError::new(
+                    "RESTORE_DATABASE_TRIGGER_REJECTED",
+                    "备份中的单元分类约束与当前软件定义不一致，已拒绝恢复。",
+                ));
+            }
+        }
+    }
     names.sort();
     expected.sort();
     if names != expected {
@@ -695,6 +731,38 @@ mod tests {
         assert!(validate_managed_file(missing_root, &expectation("../escape.png")).is_err());
         assert!(validate_managed_file(missing_root, &expectation("nested\\escape.png")).is_err());
         assert!(validate_managed_file(missing_root, &expectation("/absolute.png")).is_err());
+    }
+
+    #[tokio::test]
+    async fn unit_constraint_definitions_are_required_and_cannot_be_replaced_by_name() {
+        let root = test_root("unit-constraints");
+        let database = Database::open(&root, "test").await.unwrap();
+        let mut connection = database.pool().acquire().await.unwrap();
+        reject_unexpected_triggers(&mut connection, Database::current_schema_version())
+            .await
+            .unwrap();
+        sqlx::query("DROP TRIGGER questions_unit_insert")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let error = reject_unexpected_triggers(&mut connection, Database::current_schema_version())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "RESTORE_DATABASE_TRIGGER_REJECTED");
+        sqlx::query(
+            "CREATE TRIGGER questions_unit_insert BEFORE INSERT ON questions BEGIN SELECT 1; END",
+        )
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+        let error = reject_unexpected_triggers(&mut connection, Database::current_schema_version())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "RESTORE_DATABASE_TRIGGER_REJECTED");
+        drop(connection);
+        database.close().await;
+        drop(database);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

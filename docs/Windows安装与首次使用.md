@@ -17,6 +17,8 @@ GitHub 自动生成的 **Source code** 是源码压缩包，不是安装程序�
 
 覆盖安装或软件内更新不会删除正常的本地题库目录。首次在重要数据上升级前，仍建议先创建 `.tqb` 完整备份。
 
+0.1.107 升级到 schema 26，支持可选单元，原有题目默认未分单元。旧程序不能直接打开升级后的题库；回退时应使用升级前保留的原库或备份，旧备份不包含升级后的新编辑。
+
 ## Windows 显示“未知发布者”是什么意思
 
 当前安装包没有 Windows Authenticode 代码签名，因此 Windows 可能显示“未知发布者”或 SmartScreen 提示。这表示 Windows 无法通过商业代码签名证书确认发布者身份，不等于文件必然损坏。
@@ -60,4 +62,4 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml --lib -- --test-threads
 cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-v0.1.105 的源码变化与验证范围见 [发布说明](releases/v0.1.105.md)。未购买商业代码签名证书时，自行构建的安装包同样会显示为未签名。
+v0.1.107 的源码变化与验证范围见 [发布说明](releases/v0.1.107.md)。未购买商业代码签名证书时，自行构建的安装包同样会显示为未签名。

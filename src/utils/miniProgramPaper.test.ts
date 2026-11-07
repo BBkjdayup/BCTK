@@ -13,7 +13,7 @@ function paper(answer = 'A、C'): Paper {
 describe('mini program publication snapshots', () => {
   it('retains source identity, revision, stable classifications and proportional image size', () => {
     const p = paper(), q = p.items[0]!.snapshot
-    Object.assign(q, { id:'source-question',contentVersion:7,subjectId:'subject',subjectName:'数学',chapterId:'chapter',chapterName:'函数',tags:[{id:'tag',name:'重点'}] })
+    Object.assign(q, { id:'source-question',contentVersion:7,subjectId:'subject',subjectName:'数学',chapterId:'chapter',chapterName:'函数',unitId:'unit',unitName:'函数性质',tags:[{id:'tag',name:'重点'}] })
     q.stem.html='<p><img data-resource-id="image-one" width="150"></p>'
     const published=miniProgramPaper(p,undefined,new Map([['image:image-one',{id:'asset',width:600,height:300}]]))
     expect(published.questions[0]!.metadata).toEqual({sourceId:'source-question',revision:7,subjectId:'subject',subjectName:'数学',chapterId:'chapter',chapterName:'函数',tags:['重点'],tagIds:['tag']})

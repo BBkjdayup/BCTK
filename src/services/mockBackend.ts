@@ -438,6 +438,7 @@ function taxonomySnapshot(): { subjects: Subject[], tags: Tag[] } {
       chapters: subject.chapters.map((chapter) => ({
         ...chapter,
         questionCount: active.filter((question) => question.chapterId === chapter.id).length,
+        units: [...(chapter.units ?? [])].sort((a, b) => a.sortOrder - b.sortOrder).map((unit) => ({ ...unit, questionCount: active.filter((question) => question.unitId === unit.id).length })),
       })),
     })),
     tags: tags.map((tag) => ({
@@ -497,6 +498,7 @@ function importedDraftContent(draft: QuestionDraft) {
     explanation: draft.explanation,
     subjectId: draft.subjectId,
     chapterId: draft.chapterId,
+    unitId: draft.unitId ?? undefined,
     tagIds: [...draft.tagIds].sort(),
     resourceRefs: canonicalResourceRefs(draft.resourceRefs),
   }
@@ -511,6 +513,8 @@ function storedQuestionContent(question: Question) {
     explanation: question.explanation,
     subjectId: question.subjectId,
     chapterId: question.chapterId,
+    unitId: question.unitId ?? undefined,
+    unitName: question.unitName ?? undefined,
     tagIds: question.tags.map((tag) => tag.id).sort(),
     resourceRefs: canonicalResourceRefs(question.resourceRefs),
   }
@@ -713,6 +717,7 @@ function duplicateMember(question: Question): QuestionDuplicateMember {
     stemPreview: duplicateStemPreview(question.stem.plainText),
     subjectId: question.subjectId,
     chapterId: question.chapterId,
+    unitId: question.unitId ?? undefined,
     subjectName: question.subjectName,
     chapterName: question.chapterName,
     contentVersion: question.contentVersion,
@@ -768,6 +773,7 @@ function normalizedQuestionDraft(input: QuestionDraft): QuestionDraft {
     explanation: clone(input.explanation),
     subjectId: input.subjectId,
     chapterId: input.chapterId,
+    unitId: input.unitId ?? undefined,
     tagIds: [...input.tagIds],
     resourceRefs: clone(input.resourceRefs ?? []),
   }
@@ -1105,6 +1111,7 @@ function randomDrawCandidates(scope: RandomDrawScope) {
     if (question.deletedAt || excludedIds.has(question.id)) return false
     if (subjectIds.size && !subjectIds.has(question.subjectId)) return false
     if (scope.chapterIds.length && !scope.chapterIds.includes(question.chapterId)) return false
+    if (scope.unitIds?.length && !scope.unitIds.includes(question.unitId ?? "")) return false
     if (!matchesQuestionUsage(question.lastUsedAt, usage, currentTime)) return false
     if (!scope.tagIds.length) return true
     return scope.tagMatchMode === 'any'
@@ -1859,7 +1866,45 @@ export const mockBackend = {
     if (!subject || !chapter) taxonomyError('找不到指定章节，请刷新后重试。', 'NOT_FOUND')
     const questionCount = questions.filter((question) => question.chapterId === id).length
     if (questionCount) taxonomyError(`该章节中还有 ${questionCount} 道题，请先将题目移动到其他章节。`)
+    if (chapter.units?.length) taxonomyError("该章节下还有单元，请先删除空单元。")
     subject.chapters = subject.chapters.filter((item) => item.id !== id)
+    persist()
+  },
+
+  async createUnit(chapterId: string, value: string): Promise<string> {
+    const chapter = subjects.flatMap((subject) => subject.chapters).find((item) => item.id === chapterId)
+    if (!chapter) taxonomyError('找不到指定章节', 'NOT_FOUND')
+    const name = validatedName(value, '单元', CHAPTER_NAME_MAX)
+    const units = chapter.units ?? (chapter.units = [])
+    if (units.some((unit) => nameKey(unit.name) === nameKey(name))) taxonomyError('本章节已经存在同名单元')
+    const id = crypto.randomUUID()
+    units.push({ id, chapterId, name, sortOrder: Math.max(0, ...units.map((unit) => unit.sortOrder)) + SORT_STEP, questionCount: 0 })
+    persist()
+    return id
+  },
+  async updateUnit(id: string, value: string): Promise<void> {
+    const chapter = subjects.flatMap((subject) => subject.chapters).find((item) => item.units?.some((unit) => unit.id === id))
+    const unit = chapter?.units?.find((item) => item.id === id)
+    if (!chapter || !unit) taxonomyError('找不到指定单元', 'NOT_FOUND')
+    const name = validatedName(value, '单元', CHAPTER_NAME_MAX)
+    if (chapter.units?.some((item) => item.id !== id && nameKey(item.name) === nameKey(name))) taxonomyError('本章节已经存在同名单元')
+    unit.name = name
+    questions = questions.map((question) => question.unitId === id ? { ...question, unitName: name } : question)
+    persist()
+  },
+  async deleteUnit(id: string): Promise<void> {
+    const chapter = subjects.flatMap((subject) => subject.chapters).find((item) => item.units?.some((unit) => unit.id === id))
+    if (!chapter) taxonomyError('找不到指定单元', 'NOT_FOUND')
+    if (questions.some((question) => question.unitId === id)) taxonomyError('单元中还有题目（含回收站），请先移走题目')
+    chapter.units = chapter.units?.filter((unit) => unit.id !== id)
+    persist()
+  },
+  async saveUnitOrder(chapterId: string, items: TaxonomyOrderItem[]): Promise<void> {
+    const chapter = subjects.flatMap((subject) => subject.chapters).find((item) => item.id === chapterId)
+    if (!chapter) taxonomyError('找不到指定章节', 'NOT_FOUND')
+    assertExactOrder(items, (chapter.units ?? []).map((unit) => unit.id), '单元')
+    const positions = new Map(items.map((item) => [item.id, item.sortOrder]))
+    chapter.units?.forEach((unit) => { unit.sortOrder = positions.get(unit.id) ?? unit.sortOrder })
     persist()
   },
 
@@ -2059,6 +2104,8 @@ export const mockBackend = {
     }
     if (filters.subjectId) result = result.filter((question) => question.subjectId === filters.subjectId)
     if (filters.chapterId) result = result.filter((question) => question.chapterId === filters.chapterId)
+    if (filters.unitId) result = result.filter((question) => question.unitId === filters.unitId)
+    if (filters.unassignedUnit) result = result.filter((question) => !question.unitId)
     if (filters.type) result = result.filter((question) => question.type === filters.type)
     if (filters.tagIds.length) {
       const matchesTag = filters.tagMatchMode === 'any'
@@ -2314,6 +2361,8 @@ export const mockBackend = {
     const scope = active.filter((question) => (
       question.subjectId === request.subjectId
       && (!request.chapterId || question.chapterId === request.chapterId)
+      && (!request.unitId || question.unitId === request.unitId)
+      && (!request.unassignedUnit || !question.unitId)
     ))
     const scopeIds = new Set(scope.map((question) => question.id))
     const exactByKey = new Map<string, Question[]>()
@@ -2621,6 +2670,8 @@ export const mockBackend = {
     const subject = subjects.find((item) => item.id === draft.subjectId)
     const chapter = subject?.chapters.find((item) => item.id === draft.chapterId)
     if (!subject || !chapter) throw new Error('请选择有效的学科和章节')
+    const unit = chapter.units?.find((entry) => entry.id === draft.unitId)
+    if (draft.unitId && !unit) taxonomyError('所选单元不存在或不属于当前章节')
     const selectedTags = tags.filter((tag) => draft.tagIds.includes(tag.id))
     const existingIndex = draft.questionId ? questions.findIndex((item) => item.id === draft.questionId) : -1
     const existing = existingIndex >= 0 ? questions[existingIndex] : null
@@ -2642,8 +2693,10 @@ export const mockBackend = {
       explanation: draft.explanation,
       subjectId: draft.subjectId,
       chapterId: draft.chapterId,
+      unitId: draft.unitId ?? undefined,
       subjectName: subject.name,
       chapterName: chapter.name,
+      unitName: unit?.name,
       tags: selectedTags,
       resourceRefs: clone(draft.resourceRefs ?? []),
       createdAt: existing?.createdAt ?? Date.now(),
@@ -2818,6 +2871,8 @@ export const mockBackend = {
         taxonomyError('所选学科和章节已经不存在或不匹配，请刷新后重试。', 'BATCH_CLASSIFICATION_INVALID')
       }
     }
+    const targetUnit = targetChapter?.units?.find((unit) => unit.id === request.classification?.unitId)
+    if (request.classification?.unitId && !targetUnit) taxonomyError("所选单元不存在或不属于当前章节")
     const selectedTags = request.tagOperation.tagIds.map((tagId) => {
       const tag = tags.find((candidate) => candidate.id === tagId)
       if (!tag) taxonomyError('所选标签已经不存在，请刷新后重试。', 'BATCH_TAG_NOT_FOUND')
@@ -2862,6 +2917,8 @@ export const mockBackend = {
         chapterId: targetChapter?.id ?? question.chapterId,
         subjectName: targetSubject?.name ?? question.subjectName,
         chapterName: targetChapter?.name ?? question.chapterName,
+        unitId: request.classification ? targetUnit?.id : question.unitId,
+        unitName: request.classification ? targetUnit?.name : question.unitName,
         tags: nextTags,
         lastUsedAt: request.usageOperation === 'reset_never' ? null : question.lastUsedAt,
         updatedAt: timestamp,

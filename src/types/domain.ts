@@ -69,6 +69,15 @@ export interface Chapter {
   sortOrder: number
   questionCount: number
   lastAccessedAt?: number | null
+  units?: Unit[]
+}
+
+export interface Unit {
+  id: string
+  chapterId: string
+  name: string
+  sortOrder: number
+  questionCount: number
 }
 
 export interface Tag {
@@ -117,6 +126,8 @@ export interface Question {
   createdAt: number
   updatedAt: number
   contentVersion: number
+  unitId?: string | null
+  unitName?: string | null
 }
 
 export type QuestionSummary = Omit<Question, 'options' | 'answer' | 'explanation' | 'resourceRefs'>
@@ -136,6 +147,7 @@ export interface QuestionDraft {
   tagIds: string[]
   resourceRefs?: QuestionResourceRef[]
   baseContentVersion?: number
+  unitId?: string | null
 }
 
 export interface ImportedQuestionOverwriteItem {
@@ -303,6 +315,8 @@ export interface QuestionDuplicateBatchResult {
 export interface QuestionDuplicateScanRequest {
   subjectId: string
   chapterId?: string | null
+  unitId?: string | null
+  unassignedUnit?: boolean
 }
 
 export interface IgnoreQuestionDuplicateRequest {
@@ -323,6 +337,8 @@ export interface QuestionDuplicateMember {
   contentVersion: number
   createdAt: number
   updatedAt: number
+  unitId?: string | null
+  unitName?: string | null
 }
 
 export interface QuestionStemSummary {
@@ -358,6 +374,7 @@ export interface WordImportDraftItem {
   action?: 'skip' | 'overwrite' | 'keep' | null
   needsCheck: boolean
   checkError?: string | null
+  unresolvedUnitName?: string | null
 }
 
 export interface WordImportDraftPayload {
@@ -440,6 +457,7 @@ export interface ExcelImportRow {
   answer: string
   explanation: string
   tagNames: string[]
+  unitName?: string
 }
 
 export interface ExcelImportAnalysis {
@@ -510,6 +528,8 @@ export interface QuestionFilters {
   deleted: boolean
   page: number
   pageSize: number
+  unitId?: string | null
+  unassignedUnit?: boolean
 }
 
 export interface RandomDrawScope {
@@ -520,6 +540,7 @@ export interface RandomDrawScope {
   tagMatchMode: QuestionTagMatchMode
   usage: RandomDrawUsageFilter
   excludedQuestionIds: string[]
+  unitIds?: string[]
 }
 
 export interface RandomDrawAnalysis {
@@ -554,6 +575,7 @@ export interface QuestionDuplicateMergeReceipt {
 export interface QuestionBatchClassification {
   subjectId: string
   chapterId: string
+  unitId?: string | null
 }
 
 export type QuestionBatchTagMode = 'keep' | 'append' | 'replace' | 'remove'

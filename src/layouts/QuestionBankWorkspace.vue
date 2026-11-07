@@ -10,7 +10,7 @@ const router = useRouter()
 const appStore = useAppStore()
 const bankStore = useQuestionBankStore()
 
-async function selectTree(payload: { subjectId?: string; chapterId?: string }) {
+async function selectTree(payload: { subjectId?: string; chapterId?: string; unitId?: string; unassignedUnit?: boolean }) {
   if (route.path === '/duplicate-check') {
     if (!payload.subjectId) {
       ElMessage.warning('题目查重需要选择一个学科或具体章节')
@@ -18,12 +18,16 @@ async function selectTree(payload: { subjectId?: string; chapterId?: string }) {
     }
     bankStore.filters.subjectId = payload.subjectId
     bankStore.filters.chapterId = payload.chapterId
+    bankStore.filters.unitId = payload.unitId
+    bankStore.filters.unassignedUnit = Boolean(payload.unassignedUnit)
     bankStore.filters.page = 1
     await router.replace({
       path: route.path,
       query: {
         subjectId: payload.subjectId,
         ...(payload.chapterId ? { chapterId: payload.chapterId } : {}),
+        ...(payload.unitId ? { unitId: payload.unitId } : {}),
+        ...(payload.unassignedUnit ? { unassignedUnit: '1' } : {}),
       },
     })
     return
@@ -44,6 +48,8 @@ async function selectTree(payload: { subjectId?: string; chapterId?: string }) {
     }
     bankStore.filters.subjectId = subject.id
     bankStore.filters.chapterId = chapter.id
+    bankStore.filters.unitId = payload.unitId
+    bankStore.filters.unassignedUnit = false
     bankStore.filters.page = 1
     await router.replace({
       path: route.path,
@@ -51,6 +57,7 @@ async function selectTree(payload: { subjectId?: string; chapterId?: string }) {
         ...route.query,
         subjectId: subject.id,
         chapterId: chapter.id,
+        unitId: payload.unitId,
       },
     })
     return
@@ -59,6 +66,8 @@ async function selectTree(payload: { subjectId?: string; chapterId?: string }) {
   if (route.path !== '/questions') await router.push('/questions')
   bankStore.filters.subjectId = payload.subjectId
   bankStore.filters.chapterId = payload.chapterId
+  bankStore.filters.unitId = payload.unitId
+  bankStore.filters.unassignedUnit = Boolean(payload.unassignedUnit)
   bankStore.filters.page = 1
 }
 </script>
@@ -68,6 +77,8 @@ async function selectTree(payload: { subjectId?: string; chapterId?: string }) {
     <SubjectTree
       :selected-subject-id="bankStore.filters.subjectId"
       :selected-chapter-id="bankStore.filters.chapterId"
+      :selected-unit-id="bankStore.filters.unitId"
+      :unassigned-unit="bankStore.filters.unassignedUnit"
       @select="selectTree"
     />
     <router-view />

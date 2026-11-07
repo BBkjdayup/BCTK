@@ -476,6 +476,7 @@ async fn rebuild_one(connection: &mut SqliteConnection, row: PendingQuestion) ->
         });
     }
     let draft = normalize_search_fields(&QuestionDraftApi {
+        unit_id: None,
         answer_review_required: false,
         id: None,
         question_id: Some(id.clone()),

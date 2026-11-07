@@ -495,6 +495,7 @@ async fn sync_word_import_items(
             "diagnostic": item.diagnostic,
             "needsCheck": item.needs_check,
             "checkError": item.check_error,
+            "unresolvedUnitName": item.unresolved_unit_name,
         })
         .to_string();
         let duplicate_question_id = if let Some(candidate) = item.candidate.as_ref() {
@@ -1377,6 +1378,7 @@ fn validate_draft_shape(draft: &QuestionDraftApi, identity: &DraftIdentity) -> C
 
     validate_optional_uuid(&draft.subject_id, "学科 ID")?;
     validate_optional_uuid(&draft.chapter_id, "章节 ID")?;
+    validate_optional_uuid(draft.unit_id.as_deref().unwrap_or_default(), "单元 ID")?;
     let option_ids = option_id_set(draft)?;
     for (index, option) in draft.options.iter().enumerate() {
         validate_optional_uuid(&option.id, &format!("选项 {} 的 ID", index + 1))?;
@@ -1521,10 +1523,12 @@ mod tests {
             omitted_item_count: 0,
             active_item_id: Some(item_id.clone()),
             items: vec![WordImportDraftItemApi {
+                unresolved_unit_name: None,
                 id: item_id,
                 ordinal: 1,
                 selected: true,
                 payload: QuestionDraftApi {
+                    unit_id: None,
                     answer_review_required: false,
                     id: None,
                     question_id: None,
@@ -1559,6 +1563,7 @@ mod tests {
                 id: item_id,
                 ordinal: 1,
                 payload: QuestionDraftApi {
+                    unit_id: None,
                     answer_review_required: false,
                     id: None,
                     question_id: None,

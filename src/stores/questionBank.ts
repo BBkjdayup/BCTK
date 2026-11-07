@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { backend } from '../services/backend'
 import { errorMessage } from '../services/errors'
 import { useAppStore } from './app'
@@ -17,6 +17,8 @@ export function createQuestionFilters(overrides: Partial<QuestionFilters> = {}):
     keyword: '',
     subjectId: undefined,
     chapterId: undefined,
+    unitId: undefined,
+    unassignedUnit: false,
     type: undefined,
     usage: 'all',
     deleted: false,
@@ -33,6 +35,8 @@ function filterSignature(filters: QuestionFilters) {
     filters.keyword,
     filters.subjectId ?? null,
     filters.chapterId ?? null,
+    filters.unitId ?? null,
+    filters.unassignedUnit ?? false,
     filters.type ?? null,
     filters.tagIds,
     filters.tagMatchMode,
@@ -55,6 +59,20 @@ export const useQuestionBankStore = defineStore('questionBank', () => {
   let loadSequence = 0
 
   const hasSelection = computed(() => selectedIds.value.length > 0)
+
+  // A deleted empty unit must not leave an invisible filter active in either
+  // the question bank or the manual paper builder. Failed refreshes retain the
+  // previous taxonomy snapshot and therefore do not change the selection.
+  watch(() => appStore.subjects, (subjects) => {
+    if (!filters.unitId || !appStore.initialized || !appStore.databaseHealthy) return
+    const chapter = subjects.find((subject) => subject.id === filters.subjectId)
+      ?.chapters.find((item) => item.id === filters.chapterId)
+    if (!chapter || chapter.units?.some((unit) => unit.id === filters.unitId)) return
+    filters.unitId = undefined
+    filters.unassignedUnit = false
+    filters.page = 1
+    void load()
+  })
 
   async function load() {
     const requestSequence = ++loadSequence

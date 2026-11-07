@@ -44,7 +44,7 @@ use super::{
         StoreManagedImagesRequestApi, SubjectApi, TagApi, TaxonomyOrderItemApi, TemplateAnchorApi,
         TemplateByteSpanApi, TemplateConfigurationParagraphApi, TemplateConfigurationPreviewApi,
         TemplateImportResultApi, TemplateLayoutPreviewApi, TemplateRegionPlacementApi,
-        TemplateStyleSamplesApi, WordImportDraftPayloadApi, WordImportDraftRecordApi,
+        TemplateStyleSamplesApi, UnitApi, WordImportDraftPayloadApi, WordImportDraftRecordApi,
         WordTemplateApi, WpsClipboardImagePayloadApi,
     },
     paper_export, papers, question_bank_export, question_types, questions, random_draw, resources,
@@ -127,6 +127,9 @@ pub async fn app_initialize(
          FROM chapters c ORDER BY c.subject_id, c.sort_order, c.id",
     )
     .fetch_all(pool).await.map_err(CommandError::database)?;
+    let unit_rows = sqlx::query_as::<_, UnitApi>(
+        "SELECT u.id, u.chapter_id, u.name, u.sort_order, (SELECT COUNT(*) FROM questions q WHERE q.unit_id=u.id AND q.deleted_at_ms IS NULL) AS question_count FROM units u ORDER BY u.chapter_id, u.sort_order, u.id",
+    ).fetch_all(pool).await.map_err(CommandError::database)?;
     let tag_rows = sqlx::query_as::<_, TagRow>(
         "SELECT t.id, t.name, t.created_at_ms, t.updated_at_ms, \
          (SELECT COUNT(*) FROM question_tags qt JOIN questions q ON q.id = qt.question_id \
@@ -157,6 +160,11 @@ pub async fn app_initialize(
                     sort_order: chapter.sort_order,
                     question_count: chapter.question_count,
                     last_accessed_at: chapter.last_accessed_at_ms,
+                    units: unit_rows
+                        .iter()
+                        .filter(|unit| unit.chapter_id == chapter.id)
+                        .cloned()
+                        .collect(),
                 })
                 .collect();
             SubjectApi {
@@ -731,6 +739,32 @@ pub async fn delete_chapter(state: State<'_, AppState>, id: String) -> CommandRe
 }
 
 #[tauri::command]
+pub async fn create_unit(
+    state: State<'_, AppState>,
+    chapter_id: String,
+    name: String,
+) -> CommandResult<String> {
+    let database = state.database().await?;
+    taxonomy::create_unit(database.pool(), &chapter_id, &name, state.app_version()).await
+}
+
+#[tauri::command]
+pub async fn update_unit(
+    state: State<'_, AppState>,
+    id: String,
+    name: String,
+) -> CommandResult<()> {
+    let database = state.database().await?;
+    taxonomy::update_unit(database.pool(), &id, &name, state.app_version()).await
+}
+
+#[tauri::command]
+pub async fn delete_unit(state: State<'_, AppState>, id: String) -> CommandResult<()> {
+    let database = state.database().await?;
+    taxonomy::delete_unit(database.pool(), &id, state.app_version()).await
+}
+
+#[tauri::command]
 pub async fn create_tag(state: State<'_, AppState>, name: String) -> CommandResult<String> {
     let database = state.database().await?;
     taxonomy::create_tag(database.pool(), &name, state.app_version()).await
@@ -765,6 +799,16 @@ pub async fn save_chapter_order(
 ) -> CommandResult<()> {
     let database = state.database().await?;
     taxonomy::save_chapter_order(database.pool(), &subject_id, &items, state.app_version()).await
+}
+
+#[tauri::command]
+pub async fn save_unit_order(
+    state: State<'_, AppState>,
+    chapter_id: String,
+    items: Vec<TaxonomyOrderItemApi>,
+) -> CommandResult<()> {
+    let database = state.database().await?;
+    taxonomy::save_unit_order(database.pool(), &chapter_id, &items, state.app_version()).await
 }
 
 #[tauri::command]

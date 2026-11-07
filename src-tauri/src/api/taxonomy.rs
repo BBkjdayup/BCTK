@@ -274,6 +274,16 @@ pub async fn delete_chapter(pool: &SqlitePool, id: &str, app_version: &str) -> C
         )));
     }
 
+    let unit_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM units WHERE chapter_id = ?")
+        .bind(id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(CommandError::database)?;
+    if unit_count > 0 {
+        return Err(CommandError::validation(
+            "该章节下还有单元，请先删除空单元。",
+        ));
+    }
     sqlx::query("DELETE FROM chapters WHERE id = ?")
         .bind(id)
         .execute(&mut *transaction)
@@ -722,6 +732,232 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
         .as_millis()
         .min(i64::MAX as u128) as i64
+}
+
+pub async fn create_unit(
+    pool: &SqlitePool,
+    chapter_id: &str,
+    name: &str,
+    app_version: &str,
+) -> CommandResult<String> {
+    let (name, name_key) = validated_name(name, "单元", CHAPTER_NAME_MAX)?;
+    let id = Uuid::now_v7().to_string();
+    let now = now_millis();
+    let mut transaction = pool.begin().await.map_err(CommandError::database)?;
+    require_chapter(&mut transaction, chapter_id).await?;
+    ensure_unique_unit(&mut transaction, chapter_id, &name_key, None).await?;
+    let sort_order = next_unit_sort_order(&mut transaction, chapter_id).await?;
+
+    sqlx::query(
+        "INSERT INTO units (id, chapter_id, name, name_key, sort_order, created_at_ms, updated_at_ms) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(chapter_id)
+    .bind(&name)
+    .bind(&name_key)
+    .bind(sort_order)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .map_err(CommandError::database)?;
+    write_log(
+        &mut transaction,
+        now,
+        "unit.create",
+        "unit",
+        Some(&id),
+        "创建单元",
+        app_version,
+    )
+    .await?;
+    transaction.commit().await.map_err(CommandError::database)?;
+    Ok(id)
+}
+
+pub async fn update_unit(
+    pool: &SqlitePool,
+    id: &str,
+    name: &str,
+    app_version: &str,
+) -> CommandResult<()> {
+    let (name, name_key) = validated_name(name, "单元", CHAPTER_NAME_MAX)?;
+    let now = now_millis();
+    let mut transaction = pool.begin().await.map_err(CommandError::database)?;
+    let chapter_id = require_unit(&mut transaction, id).await?;
+    ensure_unique_unit(&mut transaction, &chapter_id, &name_key, Some(id)).await?;
+
+    sqlx::query("UPDATE units SET name = ?, name_key = ?, updated_at_ms = ? WHERE id = ?")
+        .bind(&name)
+        .bind(&name_key)
+        .bind(now)
+        .bind(id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(CommandError::database)?;
+    write_log(
+        &mut transaction,
+        now,
+        "unit.update",
+        "unit",
+        Some(id),
+        "更新单元名称",
+        app_version,
+    )
+    .await?;
+    transaction.commit().await.map_err(CommandError::database)?;
+    Ok(())
+}
+
+pub async fn delete_unit(pool: &SqlitePool, id: &str, app_version: &str) -> CommandResult<()> {
+    let now = now_millis();
+    let mut transaction = pool.begin().await.map_err(CommandError::database)?;
+    require_unit(&mut transaction, id).await?;
+    let question_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM questions WHERE unit_id = ?")
+            .bind(id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(CommandError::database)?;
+    if question_count > 0 {
+        return Err(CommandError::validation(format!(
+            "该单元中还有 {question_count} 道题，请先将题目移动到其他单元。"
+        )));
+    }
+
+    sqlx::query("DELETE FROM units WHERE id = ?")
+        .bind(id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(CommandError::database)?;
+    write_log(
+        &mut transaction,
+        now,
+        "unit.delete",
+        "unit",
+        Some(id),
+        "删除单元",
+        app_version,
+    )
+    .await?;
+    transaction.commit().await.map_err(CommandError::database)?;
+    Ok(())
+}
+
+pub async fn save_unit_order(
+    pool: &SqlitePool,
+    chapter_id: &str,
+    items: &[TaxonomyOrderItemApi],
+    app_version: &str,
+) -> CommandResult<()> {
+    validate_order_items(items)?;
+    let now = now_millis();
+    let mut transaction = pool.begin().await.map_err(CommandError::database)?;
+    require_chapter(&mut transaction, chapter_id).await?;
+    let database_ids = sqlx::query_scalar::<_, String>("SELECT id FROM units WHERE chapter_id = ?")
+        .bind(chapter_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(CommandError::database)?;
+    ensure_exact_order_scope(items, &database_ids, "单元")?;
+
+    for item in items {
+        sqlx::query(
+            "UPDATE units SET sort_order = ?, updated_at_ms = ? WHERE id = ? AND chapter_id = ?",
+        )
+        .bind(item.sort_order)
+        .bind(now)
+        .bind(&item.id)
+        .bind(chapter_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(CommandError::database)?;
+    }
+    write_log(
+        &mut transaction,
+        now,
+        "unit.reorder",
+        "chapter",
+        Some(chapter_id),
+        "批量保存单元排序",
+        app_version,
+    )
+    .await?;
+    transaction.commit().await.map_err(CommandError::database)?;
+    Ok(())
+}
+
+async fn ensure_unique_unit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    chapter_id: &str,
+    name_key: &str,
+    except_id: Option<&str>,
+) -> CommandResult<()> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM units WHERE chapter_id = ? AND name_key = ? AND (? IS NULL OR id <> ?)",
+    )
+    .bind(chapter_id)
+    .bind(name_key)
+    .bind(except_id)
+    .bind(except_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(CommandError::database)?;
+    if count > 0 {
+        return Err(CommandError::validation("这个章节中已经存在同名单元。"));
+    }
+    Ok(())
+}
+
+async fn require_unit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    id: &str,
+) -> CommandResult<String> {
+    sqlx::query_scalar::<_, String>("SELECT chapter_id FROM units WHERE id = ?")
+        .bind(id)
+        .fetch_optional(&mut **transaction)
+        .await
+        .map_err(CommandError::database)?
+        .ok_or_else(|| CommandError::new("NOT_FOUND", "找不到指定单元，请刷新后重试。"))
+}
+
+async fn next_unit_sort_order(
+    transaction: &mut Transaction<'_, Sqlite>,
+    chapter_id: &str,
+) -> CommandResult<i64> {
+    let maximum = sqlx::query_scalar::<_, Option<i64>>(
+        "SELECT MAX(sort_order) FROM units WHERE chapter_id = ?",
+    )
+    .bind(chapter_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(CommandError::database)?
+    .unwrap_or(0);
+    Ok(maximum.saturating_add(SORT_STEP))
+}
+
+pub(super) async fn validate_unit(
+    connection: &mut sqlx::SqliteConnection,
+    chapter_id: &str,
+    unit_id: Option<&str>,
+) -> CommandResult<()> {
+    if let Some(id) = unit_id {
+        let exists: i64 = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM units WHERE id = ? AND chapter_id = ?)",
+        )
+        .bind(id)
+        .bind(chapter_id)
+        .fetch_one(connection)
+        .await
+        .map_err(CommandError::database)?;
+        if exists != 1 {
+            return Err(CommandError::validation(
+                "所选单元不存在或不属于当前章节，请重新选择。",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

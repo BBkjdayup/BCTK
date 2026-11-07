@@ -126,6 +126,22 @@ export const useAppStore = defineStore('app', () => {
     await refreshAfterMutation()
   }
 
+  async function createUnit(chapterId: string, name: string) {
+    const id = await backend.createUnit(chapterId, name)
+    await refreshAfterMutation()
+    return id
+  }
+
+  async function updateUnit(id: string, name: string) {
+    await backend.updateUnit(id, name)
+    await refreshAfterMutation()
+  }
+
+  async function deleteUnit(id: string) {
+    await backend.deleteUnit(id)
+    await refreshAfterMutation()
+  }
+
   async function createTag(name: string) {
     const id = await backend.createTag(name)
     await refreshAfterMutation()
@@ -149,6 +165,10 @@ export const useAppStore = defineStore('app', () => {
 
   async function saveChapterOrder(subjectId: string, items: TaxonomyOrderItem[]) {
     await backend.saveChapterOrder(subjectId, items)
+    await refreshAfterMutation()
+  }
+  async function saveUnitOrder(chapterId: string, items: TaxonomyOrderItem[]) {
+    await backend.saveUnitOrder(chapterId, items)
     await refreshAfterMutation()
   }
 
@@ -190,6 +210,10 @@ export const useAppStore = defineStore('app', () => {
     createChapter,
     updateChapter,
     deleteChapter,
+    createUnit,
+    updateUnit,
+    deleteUnit,
+    saveUnitOrder,
     createTag,
     updateTag,
     deleteTag,

@@ -57,13 +57,16 @@ function queryText(value: unknown) {
 
 const subjectId = computed(() => queryText(route.query.subjectId))
 const chapterId = computed(() => queryText(route.query.chapterId))
+const unitId = computed(() => queryText(route.query.unitId))
+const unassignedUnit = computed(() => route.query.unassignedUnit === '1')
 const subject = computed(() => appStore.subjects.find((entry) => entry.id === subjectId.value))
 const chapter = computed(() => chapterId.value
   ? subject.value?.chapters.find((entry) => entry.id === chapterId.value)
   : undefined)
-const scopeIsValid = computed(() => Boolean(subject.value && (!chapterId.value || chapter.value)))
+const unit = computed(() => chapter.value?.units?.find((item) => item.id === unitId.value))
+const scopeIsValid = computed(() => Boolean(subject.value && (!chapterId.value || chapter.value) && (!unitId.value || unit.value)))
 const scopeName = computed(() => chapter.value
-  ? `${subject.value?.name ?? ''} / ${chapter.value.name}`
+  ? `${subject.value?.name ?? ''} / ${chapter.value.name}${unit.value ? ` / ${unit.value.name}` : unassignedUnit.value ? ' / 未分单元' : ''}`
   : subject.value?.name ?? '未选择范围')
 const groups = computed(() => activeTab.value === 'exact'
   ? result.value?.exactGroups ?? []
@@ -71,7 +74,9 @@ const groups = computed(() => activeTab.value === 'exact'
 
 function isInScope(member: QuestionDuplicateGroup['members'][number]) {
   if (member.subjectId !== subjectId.value) return false
-  return !chapterId.value || member.chapterId === chapterId.value
+  return (!chapterId.value || member.chapterId === chapterId.value)
+    && (!unitId.value || member.unitId === unitId.value)
+    && (!unassignedUnit.value || !member.unitId)
 }
 
 function resetKeepers(scanResult: QuestionDuplicateScanResult) {
@@ -93,11 +98,13 @@ async function scan() {
   result.value = null
   loadError.value = ''
   if (!scopeIsValid.value) {
-    loadError.value = '要检查的学科或章节已经不存在，请在左侧重新选择。'
+    loadError.value = '要检查的学科、章节或单元已经不存在，请在左侧重新选择。'
     return
   }
   bankStore.filters.subjectId = subjectId.value
   bankStore.filters.chapterId = chapterId.value || undefined
+  bankStore.filters.unitId = unitId.value || undefined
+  bankStore.filters.unassignedUnit = unassignedUnit.value
   bankStore.filters.page = 1
   loading.value = true
   const scanId = crypto.randomUUID()
@@ -106,6 +113,8 @@ async function scan() {
     const scanResult = await backend.scanQuestionDuplicates({
       subjectId: subjectId.value,
       chapterId: chapterId.value || undefined,
+      ...(unitId.value ? { unitId: unitId.value } : {}),
+      ...(unassignedUnit.value ? { unassignedUnit: true } : {}),
     }, scanId)
     if (requestSequence !== scanSequence) return
     result.value = scanResult
@@ -165,14 +174,14 @@ async function recycleDuplicates(group: QuestionDuplicateGroup) {
   if (sequence !== scanSequence) { operationGroupId.value = null; return }
   const fullKeeper = fullMembers.find(q => q.id === keeperId)!
   const mergedTags = [...new Map(fullMembers.flatMap(q => q.tags).map(tag => [tag.id, tag.name])).values()]
-  const classifications = [...new Set(fullMembers.map(q => `${q.subjectName} / ${q.chapterName}`))]
+  const classifications = [...new Set(fullMembers.map(q => `${q.subjectName} / ${q.chapterName} / ${q.unitName || '未分单元'}`))]
   try {
     await ElMessageBox.confirm(
       h('div', [
         h('p', group.duplicateKind === 'suspected' ? '这些题仅为疑似重复，请确认内容差异可以舍弃。保留以下题目：' : '保留以下题目：'),
         h(QuestionStemSummary, { content: fullKeeper.stem, lines: 3 }),
         h('p', `归并后标签：${mergedTags.join('、') || '无'}（共 ${mergedTags.length} 个）`),
-        h('p', `保留分类：${fullKeeper.subjectName} / ${fullKeeper.chapterName}。`),
+        h('p', `保留分类：${fullKeeper.subjectName} / ${fullKeeper.chapterName} / ${fullKeeper.unitName || '未分单元'}。`),
         ...(classifications.length > 1 ? [h('p', `本组分类不同：${classifications.join('；')}。其他分类保留在回收站中的原题上。`)] : []),
         h('p', `其余 ${recycleIds.length} 道题移入回收站。归并后可撤销，历史试卷快照保持不变。`),
       ]),
@@ -250,7 +259,7 @@ function formatTime(timestamp: number) {
 }
 
 watch(
-  () => [route.query.subjectId, route.query.chapterId, appStore.subjects.length],
+  () => [route.query.subjectId, route.query.chapterId, route.query.unitId, route.query.unassignedUnit, appStore.subjects.length],
   () => void scan(),
   { immediate: true },
 )
@@ -327,7 +336,7 @@ watch(
                   <div class="duplicate-member__meta">
                     <el-tag v-if="isInScope(member)" size="small" type="primary">检查范围内</el-tag>
                     <el-tag size="small" effect="plain">{{ questionTypeLabel(member.type, appStore.questionTypes) }}</el-tag>
-                    <span>{{ member.subjectName }} / {{ member.chapterName }}</span>
+                    <span>{{ member.subjectName }} / {{ member.chapterName }} / {{ member.unitName || '未分单元' }}</span>
                   </div>
                   <DuplicateStemSummary
                     :key="`${scanSequence}:${member.id}:${member.contentVersion}`"

@@ -1446,6 +1446,8 @@ mod tests {
 
     fn question() -> QuestionApi {
         QuestionApi {
+            unit_id: None,
+            unit_name: None,
             id: Uuid::now_v7().to_string(),
             question_type: "single_choice".to_owned(),
             question_type_name: Some("单选题".to_owned()),

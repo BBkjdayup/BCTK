@@ -9,6 +9,7 @@ export interface QuestionBatchEditForm {
   classificationMode: 'keep' | 'change'
   subjectId: string
   chapterId: string
+  unitId?: string | null
   usageOperation: QuestionBatchUsageOperation
   tagMode: QuestionBatchTagMode
   tagIds: string[]
@@ -19,6 +20,7 @@ export function createQuestionBatchEditForm(): QuestionBatchEditForm {
     classificationMode: 'keep',
     subjectId: '',
     chapterId: '',
+    unitId: undefined,
     usageOperation: 'keep',
     tagMode: 'keep',
     tagIds: [],
@@ -61,7 +63,7 @@ export function buildQuestionBatchEditRequest(
       expectedContentVersion: question.contentVersion,
     })),
     classification: form.classificationMode === 'change'
-      ? { subjectId: form.subjectId, chapterId: form.chapterId }
+      ? { subjectId: form.subjectId, chapterId: form.chapterId, unitId: form.unitId || undefined }
       : null,
     usageOperation: form.usageOperation,
     tagOperation: {
@@ -73,7 +75,7 @@ export function buildQuestionBatchEditRequest(
 
 export function questionBatchEditSummary(form: QuestionBatchEditForm): string[] {
   const items: string[] = []
-  if (form.classificationMode === 'change') items.push('修改所属学科和章节')
+  if (form.classificationMode === 'change') items.push(form.unitId ? '修改所属学科、章节和单元' : '修改所属学科和章节，设为未分单元')
   if (form.tagMode === 'append') items.push(`追加 ${form.tagIds.length} 个标签`)
   if (form.tagMode === 'replace') {
     items.push(form.tagIds.length ? `替换为 ${form.tagIds.length} 个标签` : '清空全部标签')

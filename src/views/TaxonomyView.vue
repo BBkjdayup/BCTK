@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import UnitManager from '../components/UnitManager.vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Delete, EditPen, MoreFilled, Plus } from '@element-plus/icons-vue'
@@ -11,6 +12,8 @@ import { buildTaxonomyOrderItems } from '../utils/taxonomyOrder'
 
 const appStore = useAppStore()
 const selectedSubjectId = ref<string>()
+const selectedChapterId = ref<string>()
+const selectedChapter = computed(() => orderedChapters.value.find((chapter) => chapter.id === selectedChapterId.value))
 const subjectListRoot = ref<HTMLElement>()
 const chapterListRoot = ref<HTMLElement>()
 const reordering = ref(false)
@@ -36,6 +39,10 @@ watch(
   },
   { immediate: true },
 )
+
+watch(orderedChapters, (chapters) => {
+  if (!chapters.some((chapter) => chapter.id === selectedChapterId.value)) selectedChapterId.value = chapters[0]?.id
+}, { immediate: true })
 
 function subjectNameExists(name: string, exceptId?: string) {
   const key = normalizeName(name)
@@ -154,9 +161,9 @@ async function editChapter(chapter: Chapter) {
 async function deleteChapter(chapter: Chapter) {
   const subject = selectedSubject.value
   if (!subject) return
-  if (chapter.questionCount) {
+  if (chapter.questionCount || chapter.units?.length) {
     ElMessageBox.alert(
-      `“${chapter.name}”中还有 ${chapter.questionCount} 道题，请先将这些题目移动到其他章节。`,
+      `“${chapter.name}”中还有 ${chapter.questionCount} 道题、${chapter.units?.length ?? 0} 个单元，请先移走题目并删除空单元。`,
       '暂时无法删除',
       { type: 'warning', confirmButtonText: '知道了' },
     )
@@ -312,25 +319,6 @@ function handleSubjectCommand(command: string | number | object, subject: Subjec
   if (command === 'delete') void deleteSubject(subject)
 }
 
-function formatRecentVisit(value?: number | null) {
-  if (!value) return '从未访问'
-  const date = new Date(value)
-  const today = new Date()
-  const time = new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  }).format(date)
-  if (date.toDateString() === today.toDateString()) return `今天 ${time}`
-  const yesterday = new Date(today)
-  yesterday.setDate(today.getDate() - 1)
-  if (date.toDateString() === yesterday.toDateString()) return `昨天 ${time}`
-  return new Intl.DateTimeFormat('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(date)
-}
 </script>
 
 <template>
@@ -391,27 +379,27 @@ function formatRecentVisit(value?: number | null) {
           <template v-if="selectedSubject">
             <header class="chapter-heading">
               <div>
-                <h2>{{ selectedSubject.name }}</h2>
+                <h2>章节</h2>
                 <span>{{ orderedChapters.length }} 个章节 · {{ selectedSubject.questionCount }} 道题</span>
               </div>
               <div class="chapter-heading__actions">
-                <el-button @click="editSubject(selectedSubject)">编辑学科</el-button>
                 <el-button type="primary" :icon="Plus" @click="addChapter">新增章节</el-button>
               </div>
             </header>
 
             <div v-if="orderedChapters.length" ref="chapterListRoot" class="chapter-table">
               <div class="chapter-table__head">
-                <span>排序</span>
+                <span title="拖动排序">序</span>
                 <span>章节名称</span>
-                <span>题目数量</span>
-                <span>最近访问</span>
+                <span>题数</span>
                 <span>操作</span>
               </div>
               <div
                 v-for="chapter in orderedChapters"
                 :key="chapter.id"
                 class="chapter-row"
+                :class="{ 'is-active': chapter.id === selectedChapterId }"
+                @click="selectedChapterId = chapter.id"
                 :data-chapter-id="chapter.id"
               >
                 <span
@@ -419,12 +407,11 @@ function formatRecentVisit(value?: number | null) {
                   aria-label="拖动调整章节顺序"
                   title="拖动排序"
                 >⠿</span>
-                <strong>{{ chapter.name }}</strong>
+                <strong :title="chapter.name">{{ chapter.name }}</strong>
                 <span>{{ chapter.questionCount }} 题</span>
-                <span :class="{ muted: !chapter.lastAccessedAt }">{{ formatRecentVisit(chapter.lastAccessedAt) }}</span>
                 <span class="row-actions">
-                  <el-button link type="primary" @click="editChapter(chapter)">编辑</el-button>
-                  <el-button link type="danger" @click="deleteChapter(chapter)">删除</el-button>
+                  <el-button link type="primary" @click.stop="editChapter(chapter)">编辑</el-button>
+                  <el-button link type="danger" @click.stop="deleteChapter(chapter)">删除</el-button>
                 </span>
               </div>
             </div>
@@ -445,6 +432,7 @@ function formatRecentVisit(value?: number | null) {
             <span>新增学科后，可以在这里继续维护章节。</span>
           </div>
         </section>
+        <UnitManager :chapter="selectedChapter" />
       </div>
   </section>
 </template>
@@ -471,7 +459,7 @@ function formatRecentVisit(value?: number | null) {
   min-height: 430px;
   flex: 1;
   display: grid;
-  grid-template-columns: minmax(270px, 330px) minmax(560px, 1fr);
+  grid-template-columns: minmax(170px, .7fr) minmax(250px, 1fr) minmax(270px, 1.1fr);
   gap: 14px;
 }
 
@@ -638,7 +626,7 @@ function formatRecentVisit(value?: number | null) {
 
 .chapter-table__head,
 .chapter-row {
-  min-width: 680px;
+  min-width: 0;
   display: grid;
   grid-template-columns: 52px minmax(220px, 1.6fr) 105px 135px 110px;
   align-items: center;
@@ -716,7 +704,18 @@ function formatRecentVisit(value?: number | null) {
 
 @media (max-width: 1280px) {
   .taxonomy-grid {
-    grid-template-columns: 280px minmax(520px, 1fr);
+    grid-template-columns: minmax(160px, .7fr) minmax(240px, 1fr) minmax(250px, 1.1fr);
   }
 }
+</style>
+
+<style scoped>
+.chapter-heading { min-height: 75px; padding: 12px; gap: 8px; }
+.chapter-heading > div:first-child { display: grid; gap: 5px; }
+.chapter-table__head, .chapter-row { grid-template-columns: 18px minmax(0, 1fr) 44px 68px; gap: 5px; padding: 12px 10px; }
+.chapter-row { cursor: pointer; }
+.chapter-row.is-active { background: #eff6ff; color: #1d4ed8; }
+.row-actions .el-button + .el-button { margin-left: 6px; }
+.subject-row { padding: 10px 7px; gap: 5px; }
+.chapter-warning { margin: 12px; }
 </style>
